@@ -26,3 +26,5 @@ Auto-generated from all feature plans. Last updated: [DATE]
 
 <!-- MANUAL ADDITIONS START -->
 <!-- MANUAL ADDITIONS END -->
+
+https://huggingface.co/OpenGVLab/InternVL3_5-1B
