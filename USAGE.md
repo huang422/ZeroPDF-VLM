@@ -24,19 +24,24 @@ cp /path/to/your/documents/*.jpg input/
 
 ### 4. 執行處理
 
+**預設啟用 VLM 辨識**：
 ```bash
 python main.py
+```
+
+**停用 VLM（僅前處理）**：
+```bash
+python main.py --disable-vlm
 ```
 
 ## 輸出結果
 
 處理完成後，在 `output/` 資料夾中會看到：
 
-- `{檔名}_aligned.png` - 對齊後的文件圖片
-- `{檔名}_visualization.png` - 帶有 ROI 邊界框的視覺化圖片
+- `{檔名}_visualization.png` - 帶有 ROI 邊界框的視覺化圖片（VLM 模式下會顯示辨識結果）
 - `{檔名}_metadata.json` - 處理資訊（匹配的模板、信心分數等）
-- `{檔名}_roi_{roi名稱}.png` - 每個 ROI 的個別圖片
-- `batch_summary.json` - 批次處理總結
+- `VLM_results.json` - 批次處理總結（整合前處理和 VLM 辨識結果）
+- `vlm_recognition_results.csv` - VLM 辨識結果 CSV 檔（僅 VLM 模式）
 
 ## 目錄結構
 

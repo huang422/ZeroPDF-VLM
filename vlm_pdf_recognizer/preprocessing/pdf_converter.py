@@ -79,28 +79,3 @@ def is_pdf(file_path: str) -> bool:
         True if file has .pdf extension (case-insensitive)
     """
     return file_path.lower().endswith('.pdf')
-
-
-def load_image_or_pdf(file_path: str) -> List[np.ndarray]:
-    """
-    Load images from PDF or image file.
-
-    Args:
-        file_path: Path to PDF or image file
-
-    Returns:
-        List of BGR images (single item for image files, multiple for PDFs)
-
-    Raises:
-        FileNotFoundError: If file doesn't exist
-        PDFConversionError: If PDF conversion fails
-        ValueError: If image file cannot be read
-    """
-    if is_pdf(file_path):
-        return pdf_to_images(file_path)
-    else:
-        # Load as image
-        img = cv2.imread(file_path)
-        if img is None:
-            raise ValueError(f"Failed to load image: {file_path}")
-        return [img]

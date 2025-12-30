@@ -42,6 +42,8 @@ data/
 input/
 templates/images/
 templates/location/
+prompt.md
+CLAUDE.md
 
 # Logs
 *.log
@@ -53,3 +55,14 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# VLM/PyTorch specific
+*.pt
+*.pth
+checkpoints/
+runs/
+*.onnx
+
+# HuggingFace cache (if local)
+.cache/
+huggingface/

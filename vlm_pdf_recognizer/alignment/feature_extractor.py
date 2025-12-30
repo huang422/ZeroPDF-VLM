@@ -69,48 +69,6 @@ def extract_sift_features(
     return keypoints, descriptors
 
 
-def extract_template_features(template_image: np.ndarray) -> Tuple[List[cv2.KeyPoint], np.ndarray]:
-    """
-    Extract SIFT features optimized for template images.
-
-    Args:
-        template_image: Template image (BGR or grayscale)
-
-    Returns:
-        Tuple of (keypoints, descriptors)
-
-    Raises:
-        ValueError: If no features found
-    """
-    keypoints, descriptors = extract_sift_features(template_image, for_template=True)
-
-    if descriptors is None or len(keypoints) == 0:
-        raise ValueError("No SIFT features found in template image")
-
-    return keypoints, descriptors
-
-
-def extract_document_features(document_image: np.ndarray) -> Tuple[List[cv2.KeyPoint], np.ndarray]:
-    """
-    Extract SIFT features optimized for input documents.
-
-    Args:
-        document_image: Input document image (BGR or grayscale)
-
-    Returns:
-        Tuple of (keypoints, descriptors)
-
-    Raises:
-        ValueError: If no features found
-    """
-    keypoints, descriptors = extract_sift_features(document_image, for_template=False)
-
-    if descriptors is None or len(keypoints) == 0:
-        raise ValueError("No SIFT features found in document image")
-
-    return keypoints, descriptors
-
-
 def extract_features(image: np.ndarray, is_template: bool = False) -> Tuple[List[cv2.KeyPoint], np.ndarray]:
     """
     Extract SIFT features from an image (unified interface).
@@ -125,7 +83,9 @@ def extract_features(image: np.ndarray, is_template: bool = False) -> Tuple[List
     Raises:
         ValueError: If no features found
     """
-    if is_template:
-        return extract_template_features(image)
-    else:
-        return extract_document_features(image)
+    keypoints, descriptors = extract_sift_features(image, for_template=is_template)
+
+    if descriptors is None or len(keypoints) == 0:
+        raise ValueError("No SIFT features found in image")
+
+    return keypoints, descriptors

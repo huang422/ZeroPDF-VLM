@@ -1,0 +1,552 @@
+"""
+Field schema definitions for template-specific VLM recognition.
+
+This module defines the structure of document fields, template schemas,
+and Traditional Chinese prompt templates for VLM inference.
+"""
+
+from dataclasses import dataclass
+from typing import List, Optional, Dict
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FieldSchema:
+    """Defines the structure and recognition requirements for a single document field.
+
+    Attributes:
+        field_id: Unique identifier (e.g., "company_number1", "VX1", "small")
+        field_type: Recognition type - one of: "title", "checkbox", "stamp", "text", "number"
+        template_id: Parent template identifier (contractor_1, contractor_2, enterprise_1)
+        description: Human-readable field description
+        prompt_template_key: Key to lookup prompt in PROMPT_TEMPLATES dict
+        predefined_value: For title fields only - predefined text to output without VLM inference
+    """
+
+    field_id: str
+    field_type: str  # "title" | "checkbox" | "stamp" | "text" | "number"
+    template_id: str
+    description: str
+    prompt_template_key: str
+    predefined_value: Optional[str] = None
+
+    def validate(self):
+        """Validate field schema consistency.
+
+        Raises:
+            AssertionError: If validation fails
+        """
+        assert self.field_type in {"title", "checkbox", "stamp", "text", "number"}, \
+            f"Invalid field_type: {self.field_type}"
+
+        if self.field_type == "title":
+            assert self.predefined_value is not None, \
+                f"Title field {self.field_id} must have predefined_value"
+        else:
+            assert self.predefined_value is None, \
+                f"Non-title field {self.field_id} must have null predefined_value"
+
+    def get_prompt(self, prompt_templates: Dict[str, str]) -> str:
+        """Get the VLM prompt for this field.
+
+        Args:
+            prompt_templates: Dictionary mapping prompt_template_key to prompt text
+
+        Returns:
+            VLM prompt string, or empty string for title fields
+        """
+        if self.field_type == "title":
+            return ""  # No VLM inference for titles
+
+        if self.prompt_template_key not in prompt_templates:
+            logger.warning(f"Prompt template key '{self.prompt_template_key}' not found, using generic prompt")
+            return prompt_templates.get("generic", "")
+
+        return prompt_templates[self.prompt_template_key]
+
+
+@dataclass
+class TemplateSchema:
+    """Defines the complete set of fields for a document template type.
+
+    Attributes:
+        template_id: Template identifier (contractor_1, contractor_2, enterprise_1)
+        field_schemas: Ordered list of field definitions
+        title_field_id: Field ID of the title field for this template
+    """
+
+    template_id: str
+    field_schemas: List[FieldSchema]
+    title_field_id: str
+
+    @property
+    def field_count(self) -> int:
+        """Get total number of fields in this template."""
+        return len(self.field_schemas)
+
+    def validate(self):
+        """Validate template schema consistency.
+
+        Raises:
+            AssertionError: If validation fails
+        """
+        # Check for duplicate field IDs
+        field_ids = [f.field_id for f in self.field_schemas]
+        assert len(field_ids) == len(set(field_ids)), \
+            f"Duplicate field IDs in template {self.template_id}"
+
+        # Validate title field exists
+        title_fields = [f for f in self.field_schemas if f.field_id == self.title_field_id]
+        assert len(title_fields) == 1, \
+            f"Template {self.template_id} must have exactly one title field with ID {self.title_field_id}"
+        assert title_fields[0].field_type == "title", \
+            f"Title field {self.title_field_id} must have field_type='title'"
+
+        # Validate all fields
+        for field in self.field_schemas:
+            field.validate()
+            assert field.template_id == self.template_id, \
+                f"Field {field.field_id} template_id mismatch"
+
+    def get_field_by_id(self, field_id: str) -> Optional[FieldSchema]:
+        """Retrieve field schema by field_id.
+
+        Args:
+            field_id: Field identifier to lookup
+
+        Returns:
+            FieldSchema if found, None otherwise
+        """
+        for field in self.field_schemas:
+            if field.field_id == field_id:
+                return field
+        return None
+
+
+# Traditional Chinese prompt templates for VLM inference
+# Each prompt uses <image>\n prefix and includes JSON output instruction
+PROMPT_TEMPLATES: Dict[str, str] = {
+    # Checkbox field prompts (VX1, VX2)
+    "checkbox": """<image>
+這是一個勾選框（checkbox）。請判斷框內是否有打勾或標記。
+
+**你只需要做一件事**：判斷框內是否有勾選標記
+
+**觀察重點**：
+• 仔細觀察框體**內部中央區域**（忽略外框線）
+• 尋找任何標記：打勾(✓)、打叉(X)、塗黑、手寫筆跡
+
+**判定標準**（極為重要）：
+• **has_content = true**：框內有任何清晰可見的勾選標記、打叉、塗黑或筆跡
+• **has_content = false**：框內完全空白，只有外框線和紙張底色
+
+**嚴格排除**（這些不算內容）：
+✗ 外框線本身（預印的黑色方框或圓框）
+✗ 紙張紋理或淡色背景
+✗ 非常模糊或不清楚的陰影
+
+**重要提醒**：
+• 只要看到清晰的標記就是 true
+• 完全空白才是 false
+• content_text 請簡短描述你看到的標記（例："打勾"、"打叉"、"空白"）
+
+請以JSON格式回覆：
+{"has_content": true/false, "content_text": "簡短描述"}""",
+
+    # Stamp/seal field prompts (big, small)
+    "stamp": """<image>
+這是一個印章區域。
+
+**你的任務**：
+判斷是否有看到任何正方形或圓形的黑色或紅色印章。
+
+**判定標準**（非常簡單）：
+1. has_content = true：有看到任何正方形或圓形的黑色或紅色印章（不管大小）
+2. has_content = false：完全沒有看到印章，只有空白區域或預設外框
+
+**重要提示**：
+- 只要有看到印章的形狀（正方形或圓形）和顏色（黑色或紅色），就是True
+- 預設的矩形外框線不算印章
+- 預設的浮水印文字不算印章
+
+**注意**：has_content的判定必須100%準確！
+
+請以JSON格式回覆：
+{"has_content": true/false, "content_text": null}""",
+
+    # Text field prompts (person1, person2, company1, company2, address)
+    "text": """<image>
+這是一個繁體中文文字欄位。
+
+==========================================
+第一步：判斷是否有填寫（這是唯一重要的決定！）
+==========================================
+
+請專注觀察欄位內是否有**實際填寫的深色文字筆跡**。
+
+✓ **has_content = true** 的唯一條件：
+• 看到**黑色或深藍色**的手寫中文筆畫
+• 看到**黑色**的印刷中文文字（電腦列印）
+• 筆跡必須是**深色、清晰可見**的
+
+✗ **has_content = false** 的判定（以下都是 false）：
+• 完全空白的欄位（純白色背景）
+• 只有外框線、虛線、分隔線（不算內容）
+• 只有淡灰色的預印提示文字（例如："請填寫姓名"）
+• 只有淡色浮水印或背景圖案
+
+**最重要的判斷原則**：
+如果看起來是**空白欄位**（背景幾乎全白、沒有深色筆跡）→ 必須是 **false**
+如果看起來有**深色填寫痕跡**（黑色或深藍色筆跡）→ 才是 **true**
+
+==========================================
+第二步：辨識文字內容（僅在 has_content = true 時執行）
+==========================================
+
+如果第一步確定 has_content = true，嘗試辨識內容：
+1. 能辨識 → 輸出文字（例：王大明、台灣科技股份有限公司）
+2. 無法辨識 → content_text = null
+
+**常見內容**：
+• 人名：2-4個中文字
+• 公司：包含"股份有限公司"、"有限公司"
+• 地址：縣市區路號
+
+請以JSON格式回覆：
+{"has_content": true/false, "content_text": "辨識的文字或null"}""",
+
+    # Number field prompts (company_number, company_number1, person_number1, year, month, date)
+    "number": """<image>
+這是一個數字欄位。
+
+==========================================
+第一步：判斷是否有填寫（這是唯一重要的決定！）
+==========================================
+
+請專注觀察欄位內是否有**實際填寫的深色數字筆跡**。
+
+✓ **has_content = true** 的唯一條件：
+• 看到**黑色或深藍色**的手寫數字筆畫
+• 看到**黑色**的印刷數字（電腦列印）
+• 筆跡必須是**深色、清晰可見**的
+
+✗ **has_content = false** 的判定（以下都是 false）：
+• 完全空白的欄位（純白色背景）
+• 只有外框線、虛線、分隔線（不算內容）
+• 只有淡灰色的預印模板數字（例如："114. 10. 14"）
+• 只有淡色浮水印或背景圖案
+
+**最重要的判斷原則**：
+如果看起來是**空白欄位**（背景幾乎全白、沒有深色筆跡）→ 必須是 **false**
+如果看起來有**深色填寫痕跡**（黑色或深藍色筆跡）→ 才是 **true**
+
+==========================================
+第二步：辨識數字內容（僅在 has_content = true 時執行）
+==========================================
+
+如果第一步確定 has_content = true，嘗試辨識數字：
+1. 能辨識 → 輸出數字（例：12345678）
+2. 無法辨識 → content_text = null
+
+**常見格式**：
+• 統一編號：8位數字（12345678）
+• 年份：2-3位數字（113、114）
+• 月份/日期：1-2位數字（10、25）
+
+請以JSON格式回覆：
+{"has_content": true/false, "content_text": "辨識的數字或null"}""",
+
+    # Generic fallback prompt
+    "generic": """<image>
+請仔細檢查這個區域並判斷是否有任何內容。
+
+**判定標準**：
+- has_content = true：有任何筆跡、印章或填寫內容
+- has_content = false：完全空白或只有預設框線
+
+請以JSON格式回覆：
+{"has_content": true/false, "content_text": "內容描述或null"}""",
+}
+
+
+# Template-to-field mappings
+# contractor_1: 13 fields
+CONTRACTOR_1_FIELDS = [
+    FieldSchema(
+        field_id="contractor_1_title",
+        field_type="title",
+        template_id="contractor_1",
+        description="文件標題",
+        prompt_template_key="",
+        predefined_value="企業負責人電信信評報告之使用授權書"
+    ),
+    FieldSchema(
+        field_id="VX1",
+        field_type="checkbox",
+        template_id="contractor_1",
+        description="同意/不同意勾選框1",
+        prompt_template_key="checkbox",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="person1",
+        field_type="text",
+        template_id="contractor_1",
+        description="負責人姓名欄位1",
+        prompt_template_key="text",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="company1",
+        field_type="text",
+        template_id="contractor_1",
+        description="公司名稱欄位1",
+        prompt_template_key="text",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="VX2",
+        field_type="checkbox",
+        template_id="contractor_1",
+        description="同意/不同意勾選框2",
+        prompt_template_key="checkbox",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="company2",
+        field_type="text",
+        template_id="contractor_1",
+        description="公司名稱欄位2",
+        prompt_template_key="text",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="company_number1",
+        field_type="number",
+        template_id="contractor_1",
+        description="統一編號欄位1",
+        prompt_template_key="number",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="person2",
+        field_type="text",
+        template_id="contractor_1",
+        description="負責人姓名欄位2",
+        prompt_template_key="text",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="person_number1",
+        field_type="number",
+        template_id="contractor_1",
+        description="負責人身分證字號",
+        prompt_template_key="number",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="year",
+        field_type="number",
+        template_id="contractor_1",
+        description="年份欄位",
+        prompt_template_key="number",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="month",
+        field_type="number",
+        template_id="contractor_1",
+        description="月份欄位",
+        prompt_template_key="number",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="date",
+        field_type="number",
+        template_id="contractor_1",
+        description="日期欄位",
+        prompt_template_key="number",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="big",
+        field_type="stamp",
+        template_id="contractor_1",
+        description="大印章/簽名章區域",
+        prompt_template_key="stamp",
+        predefined_value=None
+    ),
+]
+
+# contractor_2: 2 fields
+CONTRACTOR_2_FIELDS = [
+    FieldSchema(
+        field_id="contractor_2_title",
+        field_type="title",
+        template_id="contractor_2",
+        description="文件標題",
+        prompt_template_key="",
+        predefined_value="個人資料特定目的外用告知事項暨同意書"
+    ),
+    FieldSchema(
+        field_id="small",
+        field_type="stamp",
+        template_id="contractor_2",
+        description="小印章/簽名章區域",
+        prompt_template_key="stamp",
+        predefined_value=None
+    ),
+]
+
+# enterprise_1: 14 fields
+ENTERPRISE_1_FIELDS = [
+    FieldSchema(
+        field_id="enterprise_1_title",
+        field_type="title",
+        template_id="enterprise_1",
+        description="文件標題",
+        prompt_template_key="",
+        predefined_value="企業電信信評報告之使用授權書"
+    ),
+    FieldSchema(
+        field_id="VX1",
+        field_type="checkbox",
+        template_id="enterprise_1",
+        description="同意/不同意勾選框1",
+        prompt_template_key="checkbox",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="person1",
+        field_type="text",
+        template_id="enterprise_1",
+        description="負責人姓名欄位1",
+        prompt_template_key="text",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="company1",
+        field_type="text",
+        template_id="enterprise_1",
+        description="公司名稱欄位1",
+        prompt_template_key="text",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="VX2",
+        field_type="checkbox",
+        template_id="enterprise_1",
+        description="同意/不同意勾選框2",
+        prompt_template_key="checkbox",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="company2",
+        field_type="text",
+        template_id="enterprise_1",
+        description="公司名稱欄位2",
+        prompt_template_key="text",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="person2",
+        field_type="text",
+        template_id="enterprise_1",
+        description="負責人姓名欄位2",
+        prompt_template_key="text",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="company_number",
+        field_type="number",
+        template_id="enterprise_1",
+        description="統一編號欄位",
+        prompt_template_key="number",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="address",
+        field_type="text",
+        template_id="enterprise_1",
+        description="公司地址欄位",
+        prompt_template_key="text",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="year",
+        field_type="number",
+        template_id="enterprise_1",
+        description="年份欄位",
+        prompt_template_key="number",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="month",
+        field_type="number",
+        template_id="enterprise_1",
+        description="月份欄位",
+        prompt_template_key="number",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="date",
+        field_type="number",
+        template_id="enterprise_1",
+        description="日期欄位",
+        prompt_template_key="number",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="big",
+        field_type="stamp",
+        template_id="enterprise_1",
+        description="大印章區域",
+        prompt_template_key="stamp",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="small",
+        field_type="stamp",
+        template_id="enterprise_1",
+        description="小印章區域",
+        prompt_template_key="stamp",
+        predefined_value=None
+    ),
+]
+
+# Global template schemas mapping
+TEMPLATE_SCHEMAS: Dict[str, TemplateSchema] = {
+    "contractor_1": TemplateSchema(
+        template_id="contractor_1",
+        field_schemas=CONTRACTOR_1_FIELDS,
+        title_field_id="contractor_1_title"
+    ),
+    "contractor_2": TemplateSchema(
+        template_id="contractor_2",
+        field_schemas=CONTRACTOR_2_FIELDS,
+        title_field_id="contractor_2_title"
+    ),
+    "enterprise_1": TemplateSchema(
+        template_id="enterprise_1",
+        field_schemas=ENTERPRISE_1_FIELDS,
+        title_field_id="enterprise_1_title"
+    ),
+}
+
+
+# Validate all template schemas on module load
+def _validate_all_schemas():
+    """Validate all template schemas on module import."""
+    for template_id, schema in TEMPLATE_SCHEMAS.items():
+        try:
+            schema.validate()
+            logger.debug(f"Template schema '{template_id}' validated successfully ({schema.field_count} fields)")
+        except AssertionError as e:
+            logger.error(f"Template schema '{template_id}' validation failed: {e}")
+            raise
+
+
+# Run validation on import
+_validate_all_schemas()
