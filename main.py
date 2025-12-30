@@ -103,6 +103,13 @@ def main():
             print(f"   VLM Model loaded successfully:")
             print(f"   Device: {device}")
             print(f"   Precision: {precision}")
+
+            # Show auxiliary comparison status
+            if processor.blank_roi_cache.get_loaded_count() > 0:
+                print(f"   Auxiliary ROI Comparison: ENABLED")
+                print(f"   Loaded blank features: {processor.blank_roi_cache.get_loaded_count()} templates")
+            else:
+                print(f"   Auxiliary ROI Comparison: DISABLED (no blank features found)")
             print()
 
             # Initialize recognizer
@@ -155,12 +162,13 @@ def main():
                             # Extract ROI images from ExtractedROI objects
                             roi_images = [roi.roi_image for roi in result.extracted_rois]
 
-                            # Process with VLM
+                            # Process with VLM (with auxiliary comparison)
                             vlm_output = vlm_recognizer.process_document(
                                 roi_images=roi_images,
                                 template_id=result.matched_template_id,
                                 page_number=result.page_number,
-                                document_name=Path(result.input_path).name
+                                document_name=Path(result.input_path).name,
+                                blank_roi_cache=processor.blank_roi_cache
                             )
 
                             vlm_results.append(vlm_output)
@@ -282,9 +290,10 @@ def main():
     print(f"   Output directory: {output_dir}/")
     print(f"   - Aligned images: *_aligned.png")
     if args.enable_vlm and vlm_results:
-        print(f"   - Visualizations: *_visualization.png (with color-coded VLM results)")
-        print(f"     • Green boxes: has_content=True (content detected)")
-        print(f"     • Red boxes: has_content=False (no content)")
+        print(f"   - Visualizations: *_visualization.png (with color-coded results)")
+        print(f"     • Green boxes: Content detected (aux/vlm=True)")
+        print(f"     • Red boxes: No content (aux/vlm=False)")
+        print(f"     • Labels: 'aux' (auxiliary comparison) or 'vlm' (VLM recognition)")
     else:
         print(f"   - Visualizations: *_visualization.png")
     print(f"   - ROI images: rois/*_roi_*.png")

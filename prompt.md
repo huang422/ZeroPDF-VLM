@@ -192,3 +192,32 @@ H
 2. 只有文字的底方需要辨識內容，其他打勾的地方辨識有無就好
 3. 邏輯是VX1有打勾result(True)就會是False
 4. 檢查我的所有邏輯需求和prompt改得清詳細一點，整理以下內容精簡詳細的寫入prompt：
+
+VLM輔助辨識功能
+1. 詳細閱讀現在所有的程式碼和文件，不能遺失或修改錯誤現有的運作功能和邏輯。
+2. 新功能要完美整合銜接到現有的程式碼中，不能有錯誤或冗餘。
+3. update_configs.py除了現有功能是產生template的向量提供對齊之外，還要根據template/提供的座標檔進行才切出ROI後產個中template的ROI相量儲存於data（空白樣本roi向量）。
+4. 在辨識新樣本要將ROI放入VLM辨識時，先把新樣本的ROi跟空白樣本的ROi做比對（類似第一階段樣本對齊辨識template方法），諾新樣本ROI跟空白樣本ROI有很高的相似度，則代表該樣本沒有填寫蓋章或簽名。如果有差異代表可能有填寫蓋章或簽名，再送入VLM辨識。
+5. 輸出維持現有的VLM辨識所有ROi的輸出，新增一欄輔助辨識的比對結果。
+6. 輸出邏輯維持現有一樣，只是將result的判斷改為輔助辨識的比對結果優先，因為result目前只看有無不看內容，邏輯要跟現在一樣(現有邏輯是：VX1 True則result直接True，其餘所有內容應該都要是True，如果有False則result是False(除了year, month, date三個用or判斷如目前的邏輯，請先確認目前邏輯))
+7. 視覺化的輸出結果也是改成用輔助辨識的結果True or False呈現紅色和綠色
+8. VX1, VX2辨識checkbox維持現有方式
+
+VX1/VX2（勾選框）：
+aux=None（跳過輔助）
+has_content=啟發式結果
+需要用has_content（因為沒有aux）
+
+一般欄位（有輔助比對）：
+aux=True(分數低因為有填寫內容預控白樣本特徵不像)
+has_content=aux
+content_text=vlm讀取的內容
+只用aux（忽略VLM）
+
+空白欄位無特徵：
+aux=分數很高因為跟空白很接近所以回傳False
+has_content=False（因為空白沒填寫，不需要vlm確認）
+需要用has_content
+
+所有roi都會給vlm讀但視覺化呈（判斷綠紅）和判斷json result只用aux結果（因為只判斷有無）
+json要有先前完整的資訊被你刪掉了，必須包含aux有無、vlm有無、vlm判斷的內容文字

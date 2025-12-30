@@ -13,6 +13,7 @@ from vlm_pdf_recognizer.preprocessing.pdf_converter import pdf_to_images
 from vlm_pdf_recognizer.alignment.feature_extractor import extract_features
 from vlm_pdf_recognizer.alignment.template_matcher import match_templates, UnknownDocumentError
 from vlm_pdf_recognizer.alignment.geometric_corrector import align_document_to_template
+from vlm_pdf_recognizer.alignment.blank_roi_cache import BlankROIFeatureCache
 from vlm_pdf_recognizer.extraction.roi_extractor import extract_rois, draw_roi_boxes, ExtractedROI
 
 
@@ -48,6 +49,17 @@ class DocumentProcessor:
 
         # Load templates
         self._load_templates()
+
+        # Load blank ROI features cache
+        self.blank_roi_cache = BlankROIFeatureCache()
+        self.blank_roi_cache.load_from_directory(templates_dir)
+
+        if self.verbose:
+            loaded = len(self.blank_roi_cache.loaded_templates)
+            failed = len(self.blank_roi_cache.failed_templates)
+            print(f"Loaded blank ROI features: {loaded} templates")
+            if failed > 0:
+                print(f"  Warning: {failed} templates failed to load (using VLM-only mode)")
 
     def _load_templates(self):
         """Load all golden templates."""

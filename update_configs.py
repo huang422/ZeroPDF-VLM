@@ -4,6 +4,92 @@
 import os
 import json
 from pathlib import Path
+import cv2
+import numpy as np
+from vlm_pdf_recognizer.alignment.feature_extractor import extract_features
+
+
+def extract_blank_roi_features(template_id: str, template_image: np.ndarray, rois: list) -> dict:
+    """
+    Extract SIFT features from blank template ROIs.
+
+    Args:
+        template_id: Template identifier (e.g., 'contractor_1')
+        template_image: Blank template image (BGR format)
+        rois: List of ROI dictionaries with 'id' and 'coordinates'
+
+    Returns:
+        Dictionary mapping field_id to (keypoints, descriptors) tuples
+    """
+    blank_features = {}
+    rois_dir = f'data/{template_id}/rois'
+    os.makedirs(rois_dir, exist_ok=True)
+
+    for roi in rois:
+        field_id = roi['id']
+        coords = roi['coordinates']
+        x1, y1, x2, y2 = coords['x1'], coords['y1'], coords['x2'], coords['y2']
+
+        # Extract ROI image
+        roi_image = template_image[y1:y2, x1:x2]
+
+        # Save blank ROI image for reference
+        blank_roi_path = f'{rois_dir}/blank_{field_id}.png'
+        cv2.imwrite(blank_roi_path, roi_image)
+
+        # Extract SIFT features
+        try:
+            keypoints, descriptors = extract_features(roi_image, is_template=True)
+            blank_features[field_id] = (keypoints, descriptors)
+            print(f"  - {field_id}: {len(keypoints)} features")
+        except ValueError as e:
+            print(f"  - {field_id}: WARNING - {e}")
+            blank_features[field_id] = ([], None)
+
+    return blank_features
+
+
+def save_blank_roi_features(template_id: str, blank_features: dict):
+    """
+    Save blank ROI features to .npz file.
+
+    Args:
+        template_id: Template identifier
+        blank_features: Dictionary mapping field_id to (keypoints, descriptors)
+    """
+    output_path = f'data/{template_id}/blank_roi_features.npz'
+
+    # Convert keypoints to structured array format for storage
+    npz_data = {}
+    for field_id, (keypoints, descriptors) in blank_features.items():
+        # Store features even if insufficient (empty arrays as markers for pixel-based detection)
+        if descriptors is not None and len(keypoints) > 0:
+            # Convert KeyPoint objects to structured array
+            kp_array = np.array([
+                (kp.pt[0], kp.pt[1], kp.size, kp.angle, kp.response, kp.octave, kp.class_id)
+                for kp in keypoints
+            ], dtype=[
+                ('x', 'f4'), ('y', 'f4'), ('size', 'f4'), ('angle', 'f4'),
+                ('response', 'f4'), ('octave', 'i4'), ('class_id', 'i4')
+            ])
+
+            npz_data[f'{field_id}_keypoints'] = kp_array
+            npz_data[f'{field_id}_descriptors'] = descriptors
+        else:
+            # Insufficient features - store empty arrays as marker for pixel-based detection
+            empty_kp = np.array([], dtype=[
+                ('x', 'f4'), ('y', 'f4'), ('size', 'f4'), ('angle', 'f4'),
+                ('response', 'f4'), ('octave', 'i4'), ('class_id', 'i4')
+            ])
+            empty_desc = np.array([], dtype='f4').reshape(0, 128)  # Shape (0, 128)
+
+            npz_data[f'{field_id}_keypoints'] = empty_kp
+            npz_data[f'{field_id}_descriptors'] = empty_desc
+
+    # Save to compressed NumPy archive
+    np.savez(output_path, **npz_data)
+    print(f"✓ Saved blank ROI features to {output_path}")
+
 
 def update_config_from_labelme(template_id: str):
     """
@@ -76,6 +162,19 @@ def update_config_from_labelme(template_id: str):
     print(f"✓ Updated {config_path}")
     print(f"  Image: {image_width}x{image_height}")
     print(f"  ROIs: {len(rois)}")
+
+    # Load blank template image for feature extraction
+    template_image_path = f'templates/images/{template_id}.jpg'
+    if os.path.exists(template_image_path):
+        print(f"\nExtracting blank ROI features...")
+        template_image = cv2.imread(template_image_path)
+        if template_image is not None:
+            blank_features = extract_blank_roi_features(template_id, template_image, rois)
+            save_blank_roi_features(template_id, blank_features)
+        else:
+            print(f"  WARNING: Could not load template image from {template_image_path}")
+    else:
+        print(f"  WARNING: Template image not found at {template_image_path}, skipping blank ROI extraction")
 
 
 if __name__ == '__main__':

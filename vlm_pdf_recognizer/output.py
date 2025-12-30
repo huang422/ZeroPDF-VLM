@@ -93,9 +93,10 @@ def save_vlm_visualization(result: ProcessingResult, vlm_output, output_dir: str
         vlm_output: DocumentRecognitionOutput with VLM field_results
         output_dir: Directory to save visualization
 
-    Color coding:
-        - Original template color (Green by default): Title fields OR has_content=True
-        - Red (BGR: 0,0,255): has_content=False (no content detected)
+    Color coding (updated with auxiliary comparison priority):
+        - Green (BGR: 0,255,0): auxiliary_has_content=True OR vlm_has_content=True (filled fields)
+        - Red (BGR: 0,0,255): auxiliary_has_content=False OR vlm_has_content=False (empty fields)
+        - Original template color: Title fields (auxiliary_has_content=None, vlm_has_content=None)
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -123,22 +124,35 @@ def save_vlm_visualization(result: ProcessingResult, vlm_output, output_dir: str
             color = roi.visualization_color
             label = f"{roi.roi_id}: N/A"
         else:
-            # Color logic:
-            # - Title fields (has_content=None): Keep original template color
-            # - Non-title fields with has_content=True: Keep original template color
-            # - Non-title fields with has_content=False: Change to RED
-            if field_result.has_content is None:
+            # Color logic (updated with auxiliary comparison priority):
+            # Priority: auxiliary_has_content > vlm_has_content
+            # - Title fields (auxiliary=None, vlm=None): Keep original template color
+            # - Filled fields (auxiliary=True OR vlm=True): GREEN
+            # - Empty fields (auxiliary=False OR vlm=False): RED
+
+            # Determine has_content using auxiliary with fallback to VLM
+            has_content = field_result.auxiliary_has_content if field_result.auxiliary_has_content is not None else field_result.has_content
+
+            if has_content is None:
                 # Title field - use original template color
                 color = roi.visualization_color
                 label = f"{roi.roi_id}: title"
-            elif not field_result.has_content:
-                # Failed recognition - RED (use `not` instead of `is False` to handle numpy.bool_)
-                color = (0, 0, 255)
-                label = f"{roi.roi_id}: False"
+            elif has_content:
+                # Content detected - GREEN
+                color = (0, 255, 0)
+                # Show auxiliary result if available
+                if field_result.auxiliary_has_content is not None:
+                    label = f"{roi.roi_id}: aux=True"
+                else:
+                    label = f"{roi.roi_id}: vlm=True"
             else:
-                # Successful recognition - use original template color
-                color = roi.visualization_color
-                label = f"{roi.roi_id}: True"
+                # No content - RED
+                color = (0, 0, 255)
+                # Show auxiliary result if available
+                if field_result.auxiliary_has_content is not None:
+                    label = f"{roi.roi_id}: aux=False"
+                else:
+                    label = f"{roi.roi_id}: vlm=False"
 
         # Draw rectangle with thickness 2-3 for visibility
         cv2.rectangle(vis_image, (x1, y1), (x2, y2), color, 2)

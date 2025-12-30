@@ -14,6 +14,12 @@ pip install -r requirements.txt
 python update_configs.py
 ```
 
+此腳本會：
+- 讀取 `templates/location/*.json` 標註檔案
+- 生成 `data/*/config.json` 配置檔案
+- 提取空白模板 ROI 的 SIFT 特徵（用於輔助比對）
+- 儲存空白特徵至 `data/*/blank_roi_features.npz`
+
 ### 3. 放入要處理的文件
 
 將您的圖片或 PDF 檔案放到 `input/` 資料夾：
@@ -53,7 +59,9 @@ VLM-pdfRecognizer/
 ├── data/                  # 自動生成的配置
 │   ├── enterprise_1/
 │   │   ├── config.json
-│   │   └── template_features.pkl
+│   │   ├── template_features.pkl
+│   │   ├── blank_roi_features.npz  # 輔助比對特徵
+│   │   └── rois/                   # 空白 ROI 參考圖片
 │   └── ...
 ├── input/                 # 放入要處理的文件
 ├── output/                # 處理結果輸出
@@ -86,7 +94,12 @@ VLM-pdfRecognizer/
 
 ### Q: 處理速度如何？
 
-- CPU 模式：每個文件約 2-3 秒
+- 前處理（模板對齊、ROI提取）：每個文件約 2-3 秒
+- 輔助 ROI 比對：每個 ROI 約 10-30ms（SIFT 特徵匹配）
+- VLM 辨識（僅對非空白欄位執行）：
+  - GPU 模式：每個 ROI 約 0.1-0.5 秒
+  - CPU 模式（INT8）：每個 ROI 約 1-3 秒
+- 整體加速：使用輔助比對後可加快 30-50%（跳過空白欄位的 VLM 推論）
 - 第一次執行會計算並快取 SIFT 特徵，之後會快 40%
 
 ### Q: 如何查看處理結果？

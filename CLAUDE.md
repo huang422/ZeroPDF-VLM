@@ -23,6 +23,7 @@ cd src [ONLY COMMANDS FOR ACTIVE TECHNOLOGIES][ONLY COMMANDS FOR ACTIVE TECHNOLO
 Python 3.9+ (vlmcv environment): Follow standard conventions
 
 ## Recent Changes
+- 003-vlm-auxiliary-roi-comparison: Added Python 3.9+ (vlmcv environment)
 - 002-vlm-roi-recognition: Added Python 3.9+ (vlmcv environment)
 
 - 001-document-template-alignment: Added Python 3.9+ (vlmcv environment)
