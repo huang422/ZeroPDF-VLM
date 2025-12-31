@@ -4,6 +4,7 @@ Auto-generated from all feature plans. Last updated: 2025-12-23
 
 ## Active Technologies
 - File-based - InternVL 3.5-2B model cache (~2-4GB) in HuggingFace cache dir, CSV outputs to output/ (002-vlm-roi-recognition)
+- Python 3.9+ (existing vlmcv environment) (004-vlm-roi-preprocessing)
 
 - Python 3.9+ (vlmcv environment) (001-document-template-alignment)
 
@@ -23,10 +24,10 @@ cd src [ONLY COMMANDS FOR ACTIVE TECHNOLOGIES][ONLY COMMANDS FOR ACTIVE TECHNOLO
 Python 3.9+ (vlmcv environment): Follow standard conventions
 
 ## Recent Changes
+- 004-vlm-roi-preprocessing: Added Python 3.9+ (existing vlmcv environment)
 - 003-vlm-auxiliary-roi-comparison: Added Python 3.9+ (vlmcv environment)
 - 002-vlm-roi-recognition: Added Python 3.9+ (vlmcv environment)
 
-- 001-document-template-alignment: Added Python 3.9+ (vlmcv environment)
 
 <!-- MANUAL ADDITIONS START -->
 

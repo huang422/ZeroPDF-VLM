@@ -15,6 +15,7 @@ Note: JSON export functionality has been integrated into vlm_pdf_recognizer.outp
 from .vlm_loader import VLMLoader, VLMConfig
 from .field_schema import FieldSchema, TemplateSchema, TEMPLATE_SCHEMAS, PROMPT_TEMPLATES
 from .vlm_recognizer import VLMRecognizer, RecognitionResult, DocumentRecognitionOutput
+from .csv_exporter import export_recognition_results_to_csv
 
 __all__ = [
     'VLMLoader',
@@ -26,4 +27,5 @@ __all__ = [
     'DocumentRecognitionOutput',
     'TEMPLATE_SCHEMAS',
     'PROMPT_TEMPLATES',
+    'export_recognition_results_to_csv',
 ]

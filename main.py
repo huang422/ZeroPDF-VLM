@@ -103,13 +103,6 @@ def main():
             print(f"   VLM Model loaded successfully:")
             print(f"   Device: {device}")
             print(f"   Precision: {precision}")
-
-            # Show auxiliary comparison status
-            if processor.blank_roi_cache.get_loaded_count() > 0:
-                print(f"   Auxiliary ROI Comparison: ENABLED")
-                print(f"   Loaded blank features: {processor.blank_roi_cache.get_loaded_count()} templates")
-            else:
-                print(f"   Auxiliary ROI Comparison: DISABLED (no blank features found)")
             print()
 
             # Initialize recognizer
@@ -146,7 +139,7 @@ def main():
 
             # Save each result
             for result in results:
-                save_result(result, output_dir, save_rois=True)
+                save_result(result, output_dir, save_rois=False)  # Disable original ROI saving - use preprocessed ROIs instead
                 all_results.append(result)
 
                 # Print summary
@@ -162,19 +155,28 @@ def main():
                             # Extract ROI images from ExtractedROI objects
                             roi_images = [roi.roi_image for roi in result.extracted_rois]
 
-                            # Process with VLM (with auxiliary comparison)
+                            # Process with VLM and preprocessing
                             vlm_output = vlm_recognizer.process_document(
                                 roi_images=roi_images,
                                 template_id=result.matched_template_id,
                                 page_number=result.page_number,
                                 document_name=Path(result.input_path).name,
-                                blank_roi_cache=processor.blank_roi_cache
+                                blank_template_roi_cache=processor.blank_template_roi_cache
                             )
 
                             vlm_results.append(vlm_output)
 
                             print(f"   VLM Recognition complete: results={vlm_output.results}, "
                                   f"time={vlm_output.total_processing_time_ms:.0f}ms")
+
+                            # Save original and AIP-processed ROI images
+                            try:
+                                from vlm_pdf_recognizer.output import save_preprocessed_rois
+                                save_preprocessed_rois(result, vlm_output, output_dir)
+                                print(f"   Original ROI images saved to: output/rois/")
+                                print(f"   AIP-processed ROI images saved to: output/processed_rois/")
+                            except Exception as roi_error:
+                                print(f"   Warning: ROI save failed: {roi_error}")
 
                             # Save visualization with VLM results (color-coded ROI boxes)
                             try:
@@ -291,9 +293,9 @@ def main():
     print(f"   - Aligned images: *_aligned.png")
     if args.enable_vlm and vlm_results:
         print(f"   - Visualizations: *_visualization.png (with color-coded results)")
-        print(f"     • Green boxes: Content detected (aux/vlm=True)")
-        print(f"     • Red boxes: No content (aux/vlm=False)")
-        print(f"     • Labels: 'aux' (auxiliary comparison) or 'vlm' (VLM recognition)")
+        print(f"     • Green boxes: Content detected (field_id: True)")
+        print(f"     • Red boxes: No content (field_id: False)")
+        print(f"     • Blue boxes: AIP error (field_id: ERROR)")
     else:
         print(f"   - Visualizations: *_visualization.png")
     print(f"   - ROI images: rois/*_roi_*.png")

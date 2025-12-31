@@ -273,15 +273,8 @@ PROMPT_TEMPLATES: Dict[str, str] = {
 
 # Template-to-field mappings
 # contractor_1: 13 fields
+# IMPORTANT: Order MUST match config.json ROI order for correct zip() alignment
 CONTRACTOR_1_FIELDS = [
-    FieldSchema(
-        field_id="contractor_1_title",
-        field_type="title",
-        template_id="contractor_1",
-        description="文件標題",
-        prompt_template_key="",
-        predefined_value="企業負責人電信信評報告之使用授權書"
-    ),
     FieldSchema(
         field_id="VX1",
         field_type="checkbox",
@@ -289,6 +282,14 @@ CONTRACTOR_1_FIELDS = [
         description="同意/不同意勾選框1",
         prompt_template_key="checkbox",
         predefined_value=None
+    ),
+    FieldSchema(
+        field_id="contractor_1_title",
+        field_type="title",
+        template_id="contractor_1",
+        description="文件標題",
+        prompt_template_key="",
+        predefined_value="企業負責人電信信評報告之使用授權書"
     ),
     FieldSchema(
         field_id="person1",
@@ -347,6 +348,14 @@ CONTRACTOR_1_FIELDS = [
         predefined_value=None
     ),
     FieldSchema(
+        field_id="big1",
+        field_type="stamp",
+        template_id="contractor_1",
+        description="大印章/簽名章區域",
+        prompt_template_key="stamp",
+        predefined_value=None
+    ),
+    FieldSchema(
         field_id="year",
         field_type="number",
         template_id="contractor_1",
@@ -370,17 +379,10 @@ CONTRACTOR_1_FIELDS = [
         prompt_template_key="number",
         predefined_value=None
     ),
-    FieldSchema(
-        field_id="big",
-        field_type="stamp",
-        template_id="contractor_1",
-        description="大印章/簽名章區域",
-        prompt_template_key="stamp",
-        predefined_value=None
-    ),
 ]
 
 # contractor_2: 2 fields
+# IMPORTANT: Order MUST match config.json ROI order for correct zip() alignment
 CONTRACTOR_2_FIELDS = [
     FieldSchema(
         field_id="contractor_2_title",
@@ -391,7 +393,7 @@ CONTRACTOR_2_FIELDS = [
         predefined_value="個人資料特定目的外用告知事項暨同意書"
     ),
     FieldSchema(
-        field_id="small",
+        field_id="small1",
         field_type="stamp",
         template_id="contractor_2",
         description="小印章/簽名章區域",
@@ -401,15 +403,8 @@ CONTRACTOR_2_FIELDS = [
 ]
 
 # enterprise_1: 14 fields
+# IMPORTANT: Order MUST match config.json ROI order for correct zip() alignment
 ENTERPRISE_1_FIELDS = [
-    FieldSchema(
-        field_id="enterprise_1_title",
-        field_type="title",
-        template_id="enterprise_1",
-        description="文件標題",
-        prompt_template_key="",
-        predefined_value="企業電信信評報告之使用授權書"
-    ),
     FieldSchema(
         field_id="VX1",
         field_type="checkbox",
@@ -417,6 +412,14 @@ ENTERPRISE_1_FIELDS = [
         description="同意/不同意勾選框1",
         prompt_template_key="checkbox",
         predefined_value=None
+    ),
+    FieldSchema(
+        field_id="enterprise_1_title",
+        field_type="title",
+        template_id="enterprise_1",
+        description="文件標題",
+        prompt_template_key="",
+        predefined_value="企業電信信評報告之使用授權書"
     ),
     FieldSchema(
         field_id="person1",
@@ -459,19 +462,11 @@ ENTERPRISE_1_FIELDS = [
         predefined_value=None
     ),
     FieldSchema(
-        field_id="company_number",
+        field_id="company_number1",
         field_type="number",
         template_id="enterprise_1",
         description="統一編號欄位",
         prompt_template_key="number",
-        predefined_value=None
-    ),
-    FieldSchema(
-        field_id="address",
-        field_type="text",
-        template_id="enterprise_1",
-        description="公司地址欄位",
-        prompt_template_key="text",
         predefined_value=None
     ),
     FieldSchema(
@@ -499,7 +494,7 @@ ENTERPRISE_1_FIELDS = [
         predefined_value=None
     ),
     FieldSchema(
-        field_id="big",
+        field_id="big1",
         field_type="stamp",
         template_id="enterprise_1",
         description="大印章區域",
@@ -507,11 +502,19 @@ ENTERPRISE_1_FIELDS = [
         predefined_value=None
     ),
     FieldSchema(
-        field_id="small",
+        field_id="small1",
         field_type="stamp",
         template_id="enterprise_1",
         description="小印章區域",
         prompt_template_key="stamp",
+        predefined_value=None
+    ),
+    FieldSchema(
+        field_id="address",
+        field_type="text",
+        template_id="enterprise_1",
+        description="公司地址欄位",
+        prompt_template_key="text",
         predefined_value=None
     ),
 ]

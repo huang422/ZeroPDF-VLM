@@ -84,6 +84,52 @@ def save_result(result: ProcessingResult, output_dir: str, save_rois: bool = Fal
             cv2.imwrite(str(roi_path), roi.roi_image)
 
 
+def save_preprocessed_rois(result: ProcessingResult, vlm_output, output_dir: str):
+    """
+    Save both original and AIP-processed ROI images.
+
+    Args:
+        result: ProcessingResult object with extracted_rois
+        vlm_output: DocumentRecognitionOutput with field_results containing processed_roi_image
+        output_dir: Directory to save ROI images
+
+    Output structure:
+        output_dir/
+            rois/                           # Original ROI images (extracted, before AIP)
+                {input_name}_page{n}_roi_{roi_id}.png
+            processed_rois/                 # AIP ROI images (after AIP pipeline)
+                {input_name}_page{n}_roi_{roi_id}_processed.png
+    """
+    output_path = Path(output_dir)
+
+    # Create directories
+    original_roi_dir = output_path / "rois"
+    processed_roi_dir = output_path / "processed_rois"
+    original_roi_dir.mkdir(parents=True, exist_ok=True)
+    processed_roi_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate base filename
+    input_name = Path(result.input_path).stem
+    page_suffix = f"_page{result.page_number}" if result.page_number > 0 else ""
+    base_name = f"{input_name}{page_suffix}"
+
+    # Create a mapping from field_id to field_result
+    field_results_dict = {fr.field_id: fr for fr in vlm_output.field_results}
+
+    # Save both original and AIP-processed ROI images
+    for roi in result.extracted_rois:
+        field_result = field_results_dict.get(roi.roi_id)
+
+        # Save original ROI image (extracted, before any processing)
+        original_roi_path = original_roi_dir / f"{base_name}_roi_{roi.roi_id}.png"
+        cv2.imwrite(str(original_roi_path), roi.roi_image)
+
+        # Save AIP-processed image if available (final binary from AIP pipeline)
+        if field_result and field_result.processed_roi_image is not None:
+            processed_roi_path = processed_roi_dir / f"{base_name}_roi_{roi.roi_id}_processed.png"
+            cv2.imwrite(str(processed_roi_path), field_result.processed_roi_image)
+
+
 def save_vlm_visualization(result: ProcessingResult, vlm_output, output_dir: str):
     """
     Save visualization image with VLM recognition results (color-coded ROI boxes).
@@ -93,10 +139,11 @@ def save_vlm_visualization(result: ProcessingResult, vlm_output, output_dir: str
         vlm_output: DocumentRecognitionOutput with VLM field_results
         output_dir: Directory to save visualization
 
-    Color coding (updated with auxiliary comparison priority):
-        - Green (BGR: 0,255,0): auxiliary_has_content=True OR vlm_has_content=True (filled fields)
-        - Red (BGR: 0,0,255): auxiliary_has_content=False OR vlm_has_content=False (empty fields)
-        - Original template color: Title fields (auxiliary_has_content=None, vlm_has_content=None)
+    Color coding (updated with AIP priority):
+        - Green (BGR: 0,255,0): AIP_has_content=True OR has_content=True (filled fields)
+        - Red (BGR: 0,0,255): AIP_has_content=False OR has_content=False (empty fields)
+        - Blue (BGR: 255,0,0): AIP_has_content=None (AIP error/skip)
+        - Original template color: Title fields (has_content=None)
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -124,35 +171,41 @@ def save_vlm_visualization(result: ProcessingResult, vlm_output, output_dir: str
             color = roi.visualization_color
             label = f"{roi.roi_id}: N/A"
         else:
-            # Color logic (updated with auxiliary comparison priority):
-            # Priority: auxiliary_has_content > vlm_has_content
-            # - Title fields (auxiliary=None, vlm=None): Keep original template color
-            # - Filled fields (auxiliary=True OR vlm=True): GREEN
-            # - Empty fields (auxiliary=False OR vlm=False): RED
+            # Color logic (updated with AIP priority):
+            # Priority: AIP_has_content > auxiliary_has_content > has_content
+            # - Title fields (has_content=None): Keep original template color
+            # - Checkbox fields: Use heuristic has_content (AIP skipped)
+            # - Other fields: Use AIP_has_content (green=True, red=False, blue=None/error)
 
-            # Determine has_content using auxiliary with fallback to VLM
-            has_content = field_result.auxiliary_has_content if field_result.auxiliary_has_content is not None else field_result.has_content
-
-            if has_content is None:
+            # Check if this is a title field (has_content=None indicates title)
+            if field_result.has_content is None:
                 # Title field - use original template color
                 color = roi.visualization_color
                 label = f"{roi.roi_id}: title"
-            elif has_content:
-                # Content detected - GREEN
-                color = (0, 255, 0)
-                # Show auxiliary result if available
-                if field_result.auxiliary_has_content is not None:
-                    label = f"{roi.roi_id}: aux=True"
-                else:
-                    label = f"{roi.roi_id}: vlm=True"
             else:
-                # No content - RED
-                color = (0, 0, 255)
-                # Show auxiliary result if available
-                if field_result.auxiliary_has_content is not None:
-                    label = f"{roi.roi_id}: aux=False"
+                # Determine content detection result using AIP
+                if field_result.AIP_has_content is not None:
+                    # AIP result available
+                    has_content = field_result.AIP_has_content
+                    if has_content:
+                        color = (0, 255, 0)  # GREEN
+                        label = f"{roi.roi_id}: True"
+                    else:
+                        color = (0, 0, 255)  # RED
+                        label = f"{roi.roi_id}: False"
+                elif field_result.AIP_has_content is None and hasattr(field_result, 'AIP_time_ms') and field_result.AIP_time_ms is not None:
+                    # AIP ran but returned None (error case)
+                    color = (255, 0, 0)  # BLUE
+                    label = f"{roi.roi_id}: ERROR"
                 else:
-                    label = f"{roi.roi_id}: vlm=False"
+                    # Fallback to VLM result (checkbox heuristic or VLM inference)
+                    has_content = field_result.has_content
+                    if has_content:
+                        color = (0, 255, 0)  # GREEN
+                        label = f"{roi.roi_id}: True"
+                    else:
+                        color = (0, 0, 255)  # RED
+                        label = f"{roi.roi_id}: False"
 
         # Draw rectangle with thickness 2-3 for visibility
         cv2.rectangle(vis_image, (x1, y1), (x2, y2), color, 2)
@@ -314,6 +367,14 @@ def save_batch_summary_with_vlm(results: List[ProcessingResult], vlm_results: Li
     summary_path = output_path / "VLM_results.json"
     with open(summary_path, 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    # Export to CSV with AIP columns
+    try:
+        from vlm_pdf_recognizer.recognition.csv_exporter import export_recognition_results_to_csv
+        csv_path = export_recognition_results_to_csv(vlm_results, output_dir)
+    except Exception as csv_error:
+        # CSV export is optional - continue if it fails
+        print(f"   Warning: CSV export failed: {csv_error}")
 
     return str(summary_path)
 

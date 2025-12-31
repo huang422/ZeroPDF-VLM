@@ -6,89 +6,67 @@ import json
 from pathlib import Path
 import cv2
 import numpy as np
-from vlm_pdf_recognizer.alignment.feature_extractor import extract_features
 
 
-def extract_blank_roi_features(template_id: str, template_image: np.ndarray, rois: list) -> dict:
+def extract_and_save_blank_rois(template_id: str, template_image: np.ndarray, rois: list) -> int:
     """
-    Extract SIFT features from blank template ROIs.
+    Extract blank template ROI images and save as ORIGINAL PNG files (no preprocessing).
+
+    CRITICAL: Blank ROIs are saved as-is (original BGR format) for direct template difference.
+    No preprocessing is applied to ensure exact pixel-level matching with document ROIs.
+
+    Processing Strategy:
+    1. Extract ROI from blank template
+    2. Save directly as PNG (no conversion, no filtering, no processing)
+    3. Result: Raw BGR image for accurate template difference
+
+    Why NO preprocessing:
+    - Direct pixel difference is simplest and most reliable
+    - Preserves all intensity information for accurate subtraction
+    - Document ROIs also use no preprocessing for consistency
 
     Args:
         template_id: Template identifier (e.g., 'contractor_1')
-        template_image: Blank template image (BGR format)
+        template_image: Blank template image (BGR format, uint8, shape (H, W, 3))
         rois: List of ROI dictionaries with 'id' and 'coordinates'
 
     Returns:
-        Dictionary mapping field_id to (keypoints, descriptors) tuples
+        Number of blank ROI images successfully saved
+
+    Side Effects:
+        Creates directory: data/{template_id}/blank_rois/
+        Saves ORIGINAL PNG files: {field_id}.png for each ROI
     """
-    blank_features = {}
-    rois_dir = f'data/{template_id}/rois'
-    os.makedirs(rois_dir, exist_ok=True)
+    blank_rois_dir = f'data/{template_id}/blank_rois'
+    os.makedirs(blank_rois_dir, exist_ok=True)
+
+    saved_count = 0
 
     for roi in rois:
         field_id = roi['id']
         coords = roi['coordinates']
         x1, y1, x2, y2 = coords['x1'], coords['y1'], coords['x2'], coords['y2']
 
-        # Extract ROI image
+        # Validate coordinates are within image bounds
+        img_height, img_width = template_image.shape[:2]
+        if not (0 <= x1 < x2 <= img_width and 0 <= y1 < y2 <= img_height):
+            print(f"  ⚠ {field_id}: Invalid coordinates ({x1},{y1})-({x2},{y2}), image size {img_width}x{img_height}")
+            continue
+
+        # Extract ROI image (keep original BGR format, no processing)
         roi_image = template_image[y1:y2, x1:x2]
 
-        # Save blank ROI image for reference
-        blank_roi_path = f'{rois_dir}/blank_{field_id}.png'
-        cv2.imwrite(blank_roi_path, roi_image)
+        # Save original blank ROI as PNG (lossless compression)
+        # No preprocessing - keep raw image for accurate template difference
+        blank_roi_path = f'{blank_rois_dir}/{field_id}.png'
+        success = cv2.imwrite(blank_roi_path, roi_image)
 
-        # Extract SIFT features
-        try:
-            keypoints, descriptors = extract_features(roi_image, is_template=True)
-            blank_features[field_id] = (keypoints, descriptors)
-            print(f"  - {field_id}: {len(keypoints)} features")
-        except ValueError as e:
-            print(f"  - {field_id}: WARNING - {e}")
-            blank_features[field_id] = ([], None)
-
-    return blank_features
-
-
-def save_blank_roi_features(template_id: str, blank_features: dict):
-    """
-    Save blank ROI features to .npz file.
-
-    Args:
-        template_id: Template identifier
-        blank_features: Dictionary mapping field_id to (keypoints, descriptors)
-    """
-    output_path = f'data/{template_id}/blank_roi_features.npz'
-
-    # Convert keypoints to structured array format for storage
-    npz_data = {}
-    for field_id, (keypoints, descriptors) in blank_features.items():
-        # Store features even if insufficient (empty arrays as markers for pixel-based detection)
-        if descriptors is not None and len(keypoints) > 0:
-            # Convert KeyPoint objects to structured array
-            kp_array = np.array([
-                (kp.pt[0], kp.pt[1], kp.size, kp.angle, kp.response, kp.octave, kp.class_id)
-                for kp in keypoints
-            ], dtype=[
-                ('x', 'f4'), ('y', 'f4'), ('size', 'f4'), ('angle', 'f4'),
-                ('response', 'f4'), ('octave', 'i4'), ('class_id', 'i4')
-            ])
-
-            npz_data[f'{field_id}_keypoints'] = kp_array
-            npz_data[f'{field_id}_descriptors'] = descriptors
+        if success:
+            saved_count += 1
         else:
-            # Insufficient features - store empty arrays as marker for pixel-based detection
-            empty_kp = np.array([], dtype=[
-                ('x', 'f4'), ('y', 'f4'), ('size', 'f4'), ('angle', 'f4'),
-                ('response', 'f4'), ('octave', 'i4'), ('class_id', 'i4')
-            ])
-            empty_desc = np.array([], dtype='f4').reshape(0, 128)  # Shape (0, 128)
+            print(f"  ⚠ {field_id}: Failed to save blank ROI to {blank_roi_path}")
 
-            npz_data[f'{field_id}_keypoints'] = empty_kp
-            npz_data[f'{field_id}_descriptors'] = empty_desc
-
-    # Save to compressed NumPy archive
-    np.savez(output_path, **npz_data)
-    print(f"✓ Saved blank ROI features to {output_path}")
+    return saved_count
 
 
 def update_config_from_labelme(template_id: str):
@@ -163,14 +141,15 @@ def update_config_from_labelme(template_id: str):
     print(f"  Image: {image_width}x{image_height}")
     print(f"  ROIs: {len(rois)}")
 
-    # Load blank template image for feature extraction
+    # Load blank template image for blank ROI generation
     template_image_path = f'templates/images/{template_id}.jpg'
     if os.path.exists(template_image_path):
-        print(f"\nExtracting blank ROI features...")
         template_image = cv2.imread(template_image_path)
         if template_image is not None:
-            blank_features = extract_blank_roi_features(template_id, template_image, rois)
-            save_blank_roi_features(template_id, blank_features)
+            # Extract blank template ROIs (Feature 004 - Preprocessing Pipeline)
+            print(f"\nGenerating blank template ROIs...")
+            blank_roi_count = extract_and_save_blank_rois(template_id, template_image, rois)
+            print(f"  → Generated {blank_roi_count} blank ROI images in data/{template_id}/blank_rois/")
         else:
             print(f"  WARNING: Could not load template image from {template_image_path}")
     else:

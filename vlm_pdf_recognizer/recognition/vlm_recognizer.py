@@ -11,6 +11,7 @@ from datetime import datetime
 import logging
 import json
 import time
+import os
 
 import numpy as np
 import torch
@@ -19,6 +20,9 @@ from PIL import Image
 from torchvision.transforms.functional import InterpolationMode
 
 from .field_schema import TemplateSchema, FieldSchema, PROMPT_TEMPLATES
+
+# Save intermediate preprocessing images for debugging
+DEBUG_SAVE_INTERMEDIATE_IMAGES = os.getenv('DEBUG_ROI_PREPROCESSING', 'false').lower() == 'true'
 
 logger = logging.getLogger(__name__)
 
@@ -167,9 +171,8 @@ class RecognitionResult:
         parse_success: True if JSON parsing succeeded, False if fallback to defaults
         inference_time_ms: Time taken for VLM inference in milliseconds
         retry_count: Number of retries attempted (0 = success on first try)
-        auxiliary_has_content: Auxiliary ROI comparison result (True=filled, False=empty, None=skipped/error)
-        auxiliary_similarity_score: Debug metric for tuning threshold (0.0-1.0)
-        auxiliary_comparison_time_ms: Performance tracking for auxiliary comparison
+        AIP_has_content: AIP pipeline result (True=filled, False=empty, None=skipped/error)
+        processed_roi_image: Final binary image from AIP pipeline for output
     """
 
     field_id: str
@@ -179,9 +182,11 @@ class RecognitionResult:
     parse_success: bool
     inference_time_ms: float
     retry_count: int = 0
-    auxiliary_has_content: Optional[bool] = None  # NEW: Auxiliary comparison result
-    auxiliary_similarity_score: Optional[float] = None  # NEW: Debug metric
-    auxiliary_comparison_time_ms: Optional[float] = None  # NEW: Performance tracking
+    AIP_has_content: Optional[bool] = None  # AIP pipeline result (Feature 004)
+    AIP_ink_ratio: Optional[float] = None  # Ink ratio metric (Feature 004) - internal only
+    AIP_component_count: Optional[int] = None  # Component count metric (Feature 004) - internal only
+    AIP_time_ms: Optional[float] = None  # AIP time (Feature 004) - internal only
+    processed_roi_image: Optional[np.ndarray] = None  # AIP ROI image for output (Feature 004)
 
     def validate(self):
         """Validate recognition result consistency.
@@ -240,10 +245,10 @@ class DocumentRecognitionOutput:
     def calculate_results_status(self) -> bool:
         """Calculate overall results validation status based on field results.
 
-        Logic (updated with auxiliary comparison priority):
-        1. VX1 priority: If VX1.has_content==True (disagreement) using heuristic (NOT auxiliary), return False
-        2. Date fields OR: At least one of (year, month, date) has content (use auxiliary, fallback to VLM)
-        3. Other fields AND: All non-date, non-title fields have content (use auxiliary, fallback to VLM)
+        Logic (updated with AIP priority - Feature 004):
+        1. VX1 priority: If VX1.has_content==True (disagreement) using heuristic (NOT AIP), return False
+        2. Date fields OR: At least one of (year, month, date) has content (use AIP, fallback to auxiliary, fallback to VLM)
+        3. Other fields AND: All non-date, non-title fields have content (use AIP, fallback to auxiliary, fallback to VLM)
         4. Final: date_valid AND other_fields_valid
 
         Returns:
@@ -253,22 +258,23 @@ class DocumentRecognitionOutput:
         vx1_result = next((r for r in self.field_results if r.field_id == "VX1"), None)
 
         # VX1 priority check: If VX1 (disagreement checkbox) is checked, document is invalid
-        # Use heuristic has_content for VX1, NOT auxiliary (checkboxes skip auxiliary)
+        # Use heuristic has_content for VX1, NOT AIP/auxiliary (checkboxes skip both)
         if vx1_result and vx1_result.has_content:
             return False
 
-        # Find date fields (year, month, date) - use auxiliary_has_content with fallback to VLM has_content
+        # Find date fields (year, month, date) - use AIP_has_content only
         date_fields = [r for r in self.field_results if r.field_id in ("year", "month", "date")]
         date_valid = True
         if date_fields:
             date_valid = any(
-                r.auxiliary_has_content if r.auxiliary_has_content is not None else r.has_content
+                # Use AIP_has_content, fallback to VLM only if AIP is None
+                (r.AIP_has_content if r.AIP_has_content is not None else r.has_content)
                 for r in date_fields
             )
 
         # Find other fields (exclude title, VX1, date fields)
         # Note: VX2 is NOT excluded - it must be filled for document to be valid
-        # Use auxiliary_has_content with fallback to VLM has_content
+        # Use AIP_has_content only
         excluded_ids = {"VX1", "year", "month", "date"}
         other_fields = [
             r for r in self.field_results
@@ -276,7 +282,8 @@ class DocumentRecognitionOutput:
             and r.field_id not in excluded_ids
         ]
         other_fields_valid = all(
-            r.auxiliary_has_content if r.auxiliary_has_content is not None else r.has_content
+            # Use AIP_has_content, fallback to VLM only if AIP is None
+            (r.AIP_has_content if r.AIP_has_content is not None else r.has_content)
             for r in other_fields
         )
 
@@ -321,14 +328,14 @@ class DocumentRecognitionOutput:
             if field_schema and field_schema.field_type in ["checkbox", "stamp"]:
                 fields[result.field_id] = {
                     "VLM_has_content": bool(result.has_content) if result.has_content is not None else result.has_content,
-                    "AUX_has_content": result.auxiliary_has_content
+                    "AIP_has_content": bool(result.AIP_has_content) if result.AIP_has_content is not None else result.AIP_has_content
                 }
             else:
                 # For text/number fields, output both has_content and content_text
                 fields[result.field_id] = {
                     "VLM_has_content": bool(result.has_content) if result.has_content is not None else result.has_content,
                     "content_text": result.content_text,
-                    "AUX_has_content": result.auxiliary_has_content
+                    "AIP_has_content": bool(result.AIP_has_content) if result.AIP_has_content is not None else result.AIP_has_content
                 }
 
         # Return structured dictionary
@@ -347,62 +354,12 @@ class VLMRecognizer:
 
     This class processes extracted ROI regions using the loaded VLM model and
     generates structured recognition results with automatic retry on failures.
+
+    Checkbox detection is handled by:
+    1. AIP pipeline (template difference) -> AIP_has_content
+    2. VLM recognition -> has_content
+    No heuristic fallback is needed.
     """
-
-    def _heuristic_checkbox_check(self, binary_image: np.ndarray, threshold_ratio: float = 0.02) -> bool:
-        """
-        Perform a heuristic check for content in a checkbox using pixel statistics.
-
-        This method checks the central 30% area of a binary image (where marks are BLACK)
-        to see if the density of black pixels exceeds a certain threshold.
-
-        Args:
-            binary_image: Input grayscale binary image (from `_enhance_checkbox_image`).
-                         THRESH_BINARY format: marks are BLACK (0), background is WHITE (255)
-            threshold_ratio: Ratio of black pixels that must exist to be considered content.
-                            Default 2.0% (balanced threshold for checkbox detection)
-
-        Returns:
-            True if content is detected, False otherwise.
-        """
-        import cv2
-        import numpy as np
-
-        # Binary image should be grayscale
-        if binary_image.ndim != 2:
-            raise ValueError(f"Expected grayscale binary image, got shape {binary_image.shape}")
-
-        h, w = binary_image.shape
-
-        # Define the central 30% area to focus on core marking region (35%-55%)
-        start_x = int(w * 0.45)
-        end_x = int(w * 0.6)
-        start_y = int(h * 0.45)
-        end_y = int(h * 0.6)
-
-        central_roi = binary_image[start_y:end_y, start_x:end_x]
-
-        if central_roi.size == 0:
-            return False
-
-        # Count BLACK pixels (marks/content) in the central area
-        # In THRESH_BINARY: black = 0, white = 255
-        # Count pixels that are BLACK (< 128)
-        black_pixels = np.sum(central_roi < 128)
-        total_pixels = central_roi.size
-
-        # Calculate the threshold
-        pixel_threshold = total_pixels * threshold_ratio
-
-        logger.debug(
-            f"Heuristic Check: black_pixels={black_pixels}, "
-            f"total_pixels={total_pixels}, "
-            f"threshold={pixel_threshold:.1f} ({threshold_ratio*100:.2f}%), "
-            f"ratio={black_pixels/total_pixels*100:.2f}%"
-        )
-
-        # If black pixels exceed the threshold, consider it checked
-        return black_pixels > pixel_threshold
 
     def __init__(self, model: Any, tokenizer: Any, template_schemas: Dict[str, TemplateSchema]):
         """Initialize VLM recognizer.
@@ -421,7 +378,8 @@ class VLMRecognizer:
         roi_image: np.ndarray,
         field_schema: FieldSchema,
         template_id: str = None,
-        blank_roi_cache=None,  # BlankROIFeatureCache
+        blank_template_roi_cache=None,  # BlankTemplateROICache (Feature 004)
+        document_name: str = None,  # For debug image saving (Feature 004)
         max_retries: int = 3
     ) -> RecognitionResult:
         """Recognize content in a single ROI field with retry logic.
@@ -429,14 +387,15 @@ class VLMRecognizer:
         Args:
             roi_image: OpenCV BGR image of ROI region
             field_schema: Field schema defining recognition requirements
-            template_id: Template identifier for auxiliary comparison
-            blank_roi_cache: BlankROIFeatureCache for auxiliary comparison (optional)
+            template_id: Template identifier for template matching
+            blank_template_roi_cache: BlankTemplateROICache for AIP (optional, Feature 004)
+            document_name: Document name for debug images (optional, Feature 004)
             max_retries: Maximum number of retry attempts (default: 3)
 
         Returns:
             RecognitionResult with recognition output
         """
-        # Handle title fields (no VLM inference needed, no auxiliary comparison)
+        # Handle title fields (no VLM inference needed, no auxiliary comparison, no AIP)
         if field_schema.field_type == "title":
             return RecognitionResult(
                 field_id=field_schema.field_id,
@@ -446,114 +405,50 @@ class VLMRecognizer:
                 parse_success=True,
                 inference_time_ms=0.0,
                 retry_count=0,
-                auxiliary_has_content=None,  # Skip auxiliary for title
-                auxiliary_similarity_score=None,
-                auxiliary_comparison_time_ms=None
+                AIP_has_content=None,  # Skip AIP for title (Feature 004)
+                AIP_ink_ratio=None,
+                AIP_component_count=None,
+                AIP_time_ms=None,
+                processed_roi_image=None
             )
 
         # Get prompt for this field
         prompt = field_schema.get_prompt(PROMPT_TEMPLATES)
 
-        # --- VLM-first approach for Checkboxes (with heuristic validation, no auxiliary) ---
-        if field_schema.field_type == "checkbox":
+        # --- Unified AIP approach for all non-title fields (including checkboxes) ---
+        # Step 1: Perform AIP if blank template ROI cache is available (Feature 004)
+        aip_result = None
+        if blank_template_roi_cache and template_id:
             try:
-                # Step 1: VLM provides primary recognition
-                start_time = time.time()
-                # Use original image for VLM (no enhancement to preserve original appearance)
-                raw_response = self._call_vlm(roi_image, prompt)
-                inference_time_ms = (time.time() - start_time) * 1000
+                from vlm_pdf_recognizer.recognition.roi_preprocessor import ROIPreprocessor
 
-                # Parse VLM response
-                vlm_has_content, content_text, parse_success = self._parse_vlm_response(raw_response)
-
-                # Step 2: Use heuristic as primary recognition for checkbox
-                # VLM only provides description text
-                try:
-                    binary_image, _ = self._enhance_checkbox_image(roi_image)
-                    heuristic_has_content = self._heuristic_checkbox_check(binary_image)
-
-                    # Log both results for debugging
-                    logger.debug(
-                        f"Field {field_schema.field_id} (checkbox): "
-                        f"VLM={vlm_has_content}, Heuristic={heuristic_has_content}"
+                blank_roi = blank_template_roi_cache.get_blank_roi(template_id, field_schema.field_id)
+                if blank_roi is not None:
+                    # Create AIP processor with debug image saving if enabled
+                    preprocessor = ROIPreprocessor(
+                        save_debug_images=DEBUG_SAVE_INTERMEDIATE_IMAGES,
+                        output_dir="output/processed_rois" if DEBUG_SAVE_INTERMEDIATE_IMAGES else None
                     )
 
-                    # Use heuristic result as primary (pixel-based is more accurate for checkbox)
-                    final_has_content = heuristic_has_content
-
-                except Exception as heur_error:
-                    # Heuristic failed, fallback to VLM if parsing succeeded
-                    logger.warning(f"Heuristic check failed: {heur_error}, falling back to VLM result")
-                    if parse_success:
-                        final_has_content = vlm_has_content
-                    else:
-                        # Both failed, default to False
-                        final_has_content = False
-
-                # For checkbox fields: content_text must be None when has_content=False
-                if not final_has_content:
-                    content_text = None
-
-                logger.info(
-                    f"Field {field_schema.field_id} (checkbox): has_content={final_has_content}, "
-                    f"description: '{content_text}'"
-                )
-
-                return RecognitionResult(
-                    field_id=field_schema.field_id,
-                    has_content=final_has_content,
-                    content_text=content_text,
-                    raw_response=raw_response,
-                    parse_success=parse_success,
-                    inference_time_ms=inference_time_ms,
-                    retry_count=0,
-                    auxiliary_has_content=None,  # Skip auxiliary for checkbox
-                    auxiliary_similarity_score=None,
-                    auxiliary_comparison_time_ms=None
-                )
-            except Exception as e:
-                logger.error(f"Hybrid checkbox check failed for {field_schema.field_id}: {e}. Heuristic may not have run.")
-                # Fallback to default on major error
-                return RecognitionResult(
-                    field_id=field_schema.field_id,
-                    has_content=False,
-                    content_text=f"Hybrid check failed: {e}",
-                    raw_response=str(e),
-                    parse_success=False,
-                    inference_time_ms=0.0,
-                    retry_count=0
-                )
-
-        # --- Auxiliary-first approach for other fields (text, number, stamp) ---
-        # Step 1: Perform auxiliary ROI comparison if available
-        auxiliary_result = None
-        if blank_roi_cache and template_id:
-            try:
-                from vlm_pdf_recognizer.alignment.roi_comparator import compare_roi_to_blank
-
-                blank_features = blank_roi_cache.get_features(template_id, field_schema.field_id)
-                if blank_features is not None:
-                    auxiliary_result = compare_roi_to_blank(
+                    # Run AIP pipeline
+                    aip_result = preprocessor.preprocess_roi(
                         roi_image,
-                        blank_features,
-                        similarity_threshold=0.6,
-                        field_id=field_schema.field_id
+                        blank_roi,
+                        field_schema.field_id,
+                        document_name
                     )
+
+                    density_value = aip_result.ink_ratio if aip_result.ink_ratio is not None else 0.0
                     logger.debug(
-                        f"Field {field_schema.field_id}: auxiliary comparison "
-                        f"similarity={auxiliary_result.similarity_score:.2f}, "
-                        f"auxiliary_has_content={auxiliary_result.auxiliary_has_content}"
+                        f"Field {field_schema.field_id}: AIP "
+                        f"has_content={aip_result.has_content}, "
+                        f"max_density={density_value:.4f}"
                     )
             except Exception as e:
-                logger.warning(f"Auxiliary comparison failed for {field_schema.field_id}: {e}")
-                auxiliary_result = None
+                logger.warning(f"AIP failed for {field_schema.field_id}: {e}")
+                aip_result = None
 
-        # Step 2: Always run VLM for all fields
-        # (Auxiliary result is only used for visualization and validation,
-        # but VLM still runs to get content_text for JSON output)
-        should_run_vlm = True
-
-        # Step 3: Run VLM if needed
+        # Step 2: Run VLM for field recognition
         retry_count = 0
         last_exception = None
         vlm_has_content = None
@@ -562,53 +457,59 @@ class VLMRecognizer:
         vlm_parse_success = False
         vlm_inference_time_ms = 0.0
 
-        if should_run_vlm:
-            for attempt in range(max_retries):
-                try:
-                    start_time = time.time()
-                    # Pass original image for non-checkbox fields
-                    vlm_raw_response = self._call_vlm(roi_image, prompt)
-                    vlm_inference_time_ms = (time.time() - start_time) * 1000
+        for attempt in range(max_retries):
+            try:
+                start_time = time.time()
+                # Pass original image for non-checkbox fields
+                vlm_raw_response = self._call_vlm(roi_image, prompt)
+                vlm_inference_time_ms = (time.time() - start_time) * 1000
 
-                    # Parse JSON response
-                    vlm_has_content, vlm_content_text, vlm_parse_success = self._parse_vlm_response(vlm_raw_response)
-                    break  # Success, exit retry loop
+                # Parse JSON response
+                vlm_has_content, vlm_content_text, vlm_parse_success = self._parse_vlm_response(vlm_raw_response)
+                break  # Success, exit retry loop
 
-                except Exception as e:
-                    retry_count += 1
-                    last_exception = e
-                    logger.warning(
-                        f"Field {field_schema.field_id} VLM recognition failed (attempt {attempt + 1}/{max_retries}): {e}"
-                    )
-
-                    if attempt < max_retries - 1:
-                        # Exponential backoff: 1s, 2s, 4s
-                        delay = 2 ** attempt
-                        logger.info(f"Retrying after {delay}s...")
-                        time.sleep(delay)
-
-            # Check if all retries failed
-            if retry_count >= max_retries:
-                logger.error(
-                    f"Field {field_schema.field_id} VLM recognition failed after {max_retries} attempts: {last_exception}"
+            except Exception as e:
+                retry_count += 1
+                last_exception = e
+                logger.warning(
+                    f"Field {field_schema.field_id} VLM recognition failed (attempt {attempt + 1}/{max_retries}): {e}"
                 )
-                vlm_has_content = False
-                vlm_content_text = None
-                vlm_raw_response = str(last_exception)
-                vlm_parse_success = False
 
-        # Step 4: Return combined result
+                if attempt < max_retries - 1:
+                    # Exponential backoff: 1s, 2s, 4s
+                    delay = 2 ** attempt
+                    logger.info(f"Retrying after {delay}s...")
+                    time.sleep(delay)
+
+        # Check if all retries failed
+        if retry_count >= max_retries:
+            logger.error(
+                f"Field {field_schema.field_id} VLM recognition failed after {max_retries} attempts: {last_exception}"
+            )
+            vlm_has_content = False
+            vlm_content_text = None
+            vlm_raw_response = str(last_exception)
+            vlm_parse_success = False
+
+        # Step 3: Return combined result with AIP and VLM outputs
+        # For checkbox/stamp fields: content_text must be None when has_content=False
+        final_content_text = vlm_content_text
+        if field_schema.field_type in ["checkbox", "stamp"] and vlm_has_content is False:
+            final_content_text = None
+
         return RecognitionResult(
             field_id=field_schema.field_id,
             has_content=vlm_has_content,
-            content_text=vlm_content_text,
+            content_text=final_content_text,
             raw_response=vlm_raw_response,
             parse_success=vlm_parse_success,
             inference_time_ms=vlm_inference_time_ms,
             retry_count=retry_count,
-            auxiliary_has_content=auxiliary_result.auxiliary_has_content if auxiliary_result else None,
-            auxiliary_similarity_score=auxiliary_result.similarity_score if auxiliary_result else None,
-            auxiliary_comparison_time_ms=auxiliary_result.comparison_time_ms if auxiliary_result else None
+            AIP_has_content=aip_result.has_content if aip_result else None,
+            AIP_ink_ratio=aip_result.ink_ratio if aip_result else None,
+            AIP_component_count=aip_result.component_count if aip_result else None,
+            AIP_time_ms=aip_result.processing_time_ms if aip_result else None,
+            processed_roi_image=aip_result.processed_image if aip_result else None
         )
 
     def _enhance_checkbox_image(self, roi_image: np.ndarray) -> tuple:
@@ -778,7 +679,7 @@ class VLMRecognizer:
         template_id: str,
         page_number: int,
         document_name: str,
-        blank_roi_cache=None  # BlankROIFeatureCache
+        blank_template_roi_cache=None  # BlankTemplateROICache (Feature 004)
     ) -> DocumentRecognitionOutput:
         """Process all ROI fields for a single document page.
 
@@ -787,7 +688,7 @@ class VLMRecognizer:
             template_id: Template identifier (contractor_1, contractor_2, enterprise_1)
             page_number: Page index (0-based)
             document_name: Input filename
-            blank_roi_cache: BlankROIFeatureCache for auxiliary comparison (optional)
+            blank_template_roi_cache: BlankTemplateROICache for AIP (optional, Feature 004)
 
         Returns:
             DocumentRecognitionOutput with all field results and validation status
@@ -812,7 +713,13 @@ class VLMRecognizer:
 
         # Process each ROI field
         for roi_image, field_schema in zip(roi_images, template_schema.field_schemas):
-            result = self._recognize_field(roi_image, field_schema, template_id, blank_roi_cache)
+            result = self._recognize_field(
+                roi_image,
+                field_schema,
+                template_id,
+                blank_template_roi_cache,
+                document_name
+            )
             field_results.append(result)
             logger.debug(
                 f"Field {field_schema.field_id}: has_content={result.has_content}, "

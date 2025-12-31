@@ -194,8 +194,9 @@ H
 4. 檢查我的所有邏輯需求和prompt改得清詳細一點，整理以下內容精簡詳細的寫入prompt：
 
 VLM輔助辨識功能
-1. 詳細閱讀現在所有的程式碼和文件，不能遺失或修改錯誤現有的運作功能和邏輯。
-2. 新功能要完美整合銜接到現有的程式碼中，不能有錯誤或冗餘。
+- 我要修改003-vlm-auxiliary-roi-comparison spec所有邏輯和功能，移除不必要的內容我要全部修改
+- 詳細閱讀現在所有的程式碼和文件，不能遺失或修改錯誤現有的運作功能和邏輯。
+-  新功能要完美整合銜接到現有的程式碼中，不能有錯誤或冗餘。
 3. update_configs.py除了現有功能是產生template的向量提供對齊之外，還要根據template/提供的座標檔進行才切出ROI後產個中template的ROI相量儲存於data（空白樣本roi向量）。
 4. 在辨識新樣本要將ROI放入VLM辨識時，先把新樣本的ROi跟空白樣本的ROi做比對（類似第一階段樣本對齊辨識template方法），諾新樣本ROI跟空白樣本ROI有很高的相似度，則代表該樣本沒有填寫蓋章或簽名。如果有差異代表可能有填寫蓋章或簽名，再送入VLM辨識。
 5. 輸出維持現有的VLM辨識所有ROi的輸出，新增一欄輔助辨識的比對結果。
@@ -221,3 +222,129 @@ has_content=False（因為空白沒填寫，不需要vlm確認）
 
 所有roi都會給vlm讀但視覺化呈（判斷綠紅）和判斷json result只用aux結果（因為只判斷有無）
 json要有先前完整的資訊被你刪掉了，必須包含aux有無、vlm有無、vlm判斷的內容文字
+
+VLM輔助辨識功能roi影像處理
+- 我要修改003-vlm-auxiliary-roi-comparison spec所有邏輯和功能，移除不必要的內容我要全部修改
+- 詳細閱讀現在所有的程式碼和文件，不能遺失或修改錯誤現有的運作功能和邏輯。
+- 新功能要完美整合銜接到現有的程式碼中，不能有錯誤或冗餘。
+- 將先前已完成對齊才切後的roi做影像處理，再將處理好的roi送入vlm辨識內容
+- 輸出結果result只辨識roi經過影像處理後位置有無蓋章簽名或文字(True or False)
+- 輸出邏輯維持現有一樣，只是將result的判斷改為VLM輔助辨識功能roi影像處理結果優先，因為result目前只看有無不看內容，邏輯要跟現在一樣(現有邏輯是：VX1 True則result直接True，其餘所有內容應該都要是True，如果有False則result是False(除了year, month, date三個用or判斷如目前的邏輯，請先確認目前邏輯沿用目前邏輯))
+- 視覺化的輸出結果也是改成用輔助辨識的結果True or False呈現紅色和綠色
+- 除了title無需影響處理辨識可直接對應結果，其他都需要做影像處理後放入vlm
+- roi影像處理影像處理方法： 
+1. 
+【問題背景】
+每一個 ROI 都有：
+roi_sample：實際要辨識的 ROI 影像
+roi_template：同位置的「空白範本 ROI」(更新update_configs.py初始化建立模板時也同時建立範本template的roi)
+
+ROI 內可能包含：
+預設表單框線（直線、矩形）
+印刷文字（固定字型）
+預設空白或只有框線
+真正要偵測的內容為：
+手寫簽名（不規則、曲線）或印刷文字
+印章（紅色或黑色，可能顏色很淺）
+
+必須忽略所有預設內容（框線、印刷字、底線）
+即使印章顏色很淡，也要盡量能被偵測
+最終輸出必須是明確的：
+has_content:True or False
+每一個判斷步驟都必須是「可解釋、可調參數」
+Step 1：前處理（Pre-processing）
+說明是否需要進行色彩空間轉換（RGB → HSV 或 Lab）
+解釋為什麼使用「飽和度或亮度相關 channel」有助於保留：
+淺色印章
+深色手寫
+返回一張用於後續處理的單通道影像
+Step 2：與空白範本進行差分（Template Difference）
+使用 roi_sample 與 roi_template
+實作：
+灰階轉換
+絕對差分（absolute difference）
+二值化（threshold）
+請清楚說明：
+為什麼差分可以在「語意上」移除預設內容
+為什麼實務上仍可能殘留細線
+Step 3：結構性過濾（移除框線殘留）
+使用形態學（Morphological OPEN）
+分別移除：
+長水平線
+長垂直線
+請說明：
+kernel 大小如何依 ROI 尺寸自動設定
+為什麼這一步「不會移除手寫或印章」
+Step 4：雜訊移除（Noise Removal）
+移除：
+極小面積雜訊
+掃描噪點
+請說明 kernel 大小與最小面積門檻的選擇原則
+Step 5：存在性特徵萃取（最小集合）
+本步驟只允許萃取「是否存在新增墨跡」所需的最小特徵
+5.1 墨跡比例（Ink Ratio）
+定義：
+ink_ratio = 非零像素數 / ROI 總像素數
+說明為什麼它是必要條件
+5.2 有效連通區數（Connected Components / Contours）
+僅統計面積大於最小門檻的區塊
+說明：
+為什麼框線殘影通常只有 1～2 個
+為什麼人為墨跡通常 ≥ 3 個
+Step 6：最終決策邏輯（只輸出 有 / 無）
+請設計明確的 rule-based 邏輯：
+定義：
+has_content:True or False
+請提供：
+建議的初始 threshold 範圍
+- roi影像處理結果圖片也存入output/
+- 再將處理好的roi判別結果進行 results的計算並銜接到目前的vlm辨識
+
+目前實作流程是這樣，. HSV Saturation Extraction: Preserve faint colored stamps 2. Template Difference: Remove pre-printed content 3. Horizontal Line Removal: Morphological opening 4. Vertical Line Removal: Morphological opening 5. Noise Removal: Connected components filtering 6. Feature Extraction & Decision: Ink ratio and component count
+
+修改成
+策略 A：局部密度（Local Density Map）
+
+取代：
+
+opening
+
+CC filtering
+
+feature extraction
+
+作法：
+binary_diff → blur → density_map
+
+density = cv2.GaussianBlur(binary_diff.astype(np.float32), (k, k), 0)
+
+
+這代表：
+
+單一細筆畫 → 局部密度高
+
+雜訊 → 密度低、分散
+
+殘留框線 → 密度集中在邊界（可忽略）
+
+✅ 策略 B：排除「邊界區域」
+
+99% 表單框線都在 ROI 邊緣
+
+mask = np.ones_like(density)
+mask[edge_margin:-edge_margin, edge_margin:-edge_margin] = 0
+
+
+👉 只看 ROI 中心區域
+
+✅ 策略 C：只問一件事
+
+中心區域內，有沒有「足夠密集的差異」？
+
+has_ink = np.max(density * center_mask) > density_threshold
+
+五、你最後只需要「一個數值」
+✨ 最終判斷只靠這個
+score = max_local_density
+
+應該在update_configs.py產生blank_rois就要做二職話，因為原始整範本只能有黑色和白色，這楊才能讓後面的影像處理做差分比對

@@ -13,7 +13,7 @@ from vlm_pdf_recognizer.preprocessing.pdf_converter import pdf_to_images
 from vlm_pdf_recognizer.alignment.feature_extractor import extract_features
 from vlm_pdf_recognizer.alignment.template_matcher import match_templates, UnknownDocumentError
 from vlm_pdf_recognizer.alignment.geometric_corrector import align_document_to_template
-from vlm_pdf_recognizer.alignment.blank_roi_cache import BlankROIFeatureCache
+from vlm_pdf_recognizer.alignment.blank_template_roi_cache import BlankTemplateROICache
 from vlm_pdf_recognizer.extraction.roi_extractor import extract_rois, draw_roi_boxes, ExtractedROI
 
 
@@ -50,16 +50,19 @@ class DocumentProcessor:
         # Load templates
         self._load_templates()
 
-        # Load blank ROI features cache
-        self.blank_roi_cache = BlankROIFeatureCache()
-        self.blank_roi_cache.load_from_directory(templates_dir)
+        # Load blank template ROI cache (for AIP pipeline - Feature 004)
+        self.blank_template_roi_cache = BlankTemplateROICache()
+        blank_roi_count = 0
+        for template in self.templates:
+            count = self.blank_template_roi_cache.load_blank_rois(
+                template.template_id, templates_dir
+            )
+            blank_roi_count += count
 
-        if self.verbose:
-            loaded = len(self.blank_roi_cache.loaded_templates)
-            failed = len(self.blank_roi_cache.failed_templates)
-            print(f"Loaded blank ROI features: {loaded} templates")
-            if failed > 0:
-                print(f"  Warning: {failed} templates failed to load (using VLM-only mode)")
+        if self.verbose and blank_roi_count > 0:
+            # Display blank template ROI cache status
+            loaded_templates = len(self.blank_template_roi_cache.get_loaded_templates())
+            print(f"Loaded blank template ROIs: {blank_roi_count} ROIs from {loaded_templates} templates")
 
     def _load_templates(self):
         """Load all golden templates."""

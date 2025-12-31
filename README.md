@@ -10,28 +10,38 @@ Local, zero-shot document processing system for Traditional Chinese scanned PDF 
 - **Geometric Alignment**: SIFT feature matching with homography transformation
 - **ROI Extraction**: Extracts predefined regions of interest with bounding box visualization
 
-### VLM Recognition (InternVL 3.5-8B)
+### AIP (Advanced Image Processing) - ROI Content Detection
+- **Template Difference**: Direct BGR pixel difference with ECC sub-pixel alignment
+- **Multi-Stage Thresholding**: Adaptive threshold for pre-printed text handling
+- **Fast Detection**: ~10-30ms per ROI (template difference-based)
+- **High Accuracy**: 100% detection rate on test set (26 ROIs)
+- **Pre-VLM Filtering**: Skips VLM inference for confirmed empty fields, reducing processing time
+
+### VLM Recognition (InternVLM 3.5-2B)
 - **Zero-Shot Content Recognition**: Detects checkbox marks, stamps, and extracts text content without training
-- **Auxiliary ROI Comparison**: SIFT-based pixel comparison to detect empty fields before VLM, reducing processing time by 30-50%
 - **Field-Specific Prompts**: Customized Traditional Chinese prompts for different field types
 - **Smart Output**: Checkbox/stamp fields output only presence (True/False), text fields include extracted content
-- **Validation Logic**: Automatic document validation based on required fields and VX1 disagreement detection
-- **Enhanced Model**: 8B parameter model for superior accuracy and reasoning capabilities
+- **Validation Logic**: Automatic document validation based on required fields and VX disagreement detection
+- **Compact Model**: 2B parameter model for efficient processing
 
 ### System Features
-- **Batch Processing**: Process entire directories with integrated VLM results
+- **Dual Detection**: AIP (template difference) + VLM (content recognition)
+- **Batch Processing**: Process entire directories with integrated results
 - **GPU Acceleration**: Automatic GPU/CPU detection with INT8/INT4 quantization fallback
-- **JSON Output**: Structured VLM_results.json with preprocessing and VLM recognition statistics
-- **Color-Coded Visualization**: Green boxes for detected content, red boxes for missing content
+- **JSON Output**: Structured VLM_results.json with AIP and VLM recognition statistics
+- **Color-Coded Visualization**:
+  - Green boxes: Content detected (field_id: True)
+  - Red boxes: No content (field_id: False)
+  - Blue boxes: AIP error (field_id: ERROR)
 - **Adaptive Precision**: Automatically selects optimal precision (BF16/FP16/INT8/INT4) based on available VRAM
 
 ## Requirements
 
 - Python 3.9+
 - OpenCV 4.x
-- PyTorch 2.0+
-- Transformers 4.52.1+ (HuggingFace)
-- **12GB+ VRAM** (GPU mode, 16GB+ recommended for best quality) or **16GB+ RAM** (CPU mode with quantization)
+- PyTorch 2.0+ (for VLM only)
+- Transformers 4.52.1+ (HuggingFace, for VLM only)
+- **6-8GB VRAM** (GPU mode with FP16) or **16GB+ RAM** (CPU mode with INT8 quantization)
 
 ## Installation
 
@@ -47,7 +57,7 @@ conda activate vlmcv
 pip install -r requirements.txt
 ```
 
-**Note**: InternVL 3.5-8B model (~16GB) will be automatically downloaded from HuggingFace on first run.
+**Note**: InternVL 3.5-2B model (~4-6GB) will be automatically downloaded from HuggingFace on first run.
 
 ## Quick Start
 
@@ -68,8 +78,7 @@ VLM-pdfRecognizer/
 │   ├── enterprise_1/
 │   │   ├── config.json
 │   │   ├── template_features.pkl (cached)
-│   │   ├── blank_roi_features.npz (auxiliary comparison)
-│   │   └── rois/                 # Blank ROI reference images
+│   │   └── blank_rois/          # Blank ROI reference images for AIP
 │   ├── contractor_1/...
 │   └── contractor_2/...
 ├── input/                   # Put your documents here
@@ -88,8 +97,7 @@ python update_configs.py
 This script:
 - Reads annotations from `templates/location/*.json`
 - Generates `data/*/config.json` for each template
-- Extracts blank ROI features for auxiliary comparison
-- Saves blank features to `data/*/blank_roi_features.npz`
+- Extracts blank ROI images for AIP template difference
 
 ### 3. Run Processing
 
@@ -98,7 +106,7 @@ This script:
 python main.py
 ```
 
-**Without VLM (preprocessing only)**:
+**Without VLM (AIP only)**:
 ```bash
 python main.py --disable-vlm
 ```
@@ -106,7 +114,8 @@ python main.py --disable-vlm
 That's it! The program will:
 - Load all templates from `templates/images/`
 - Process all files in `input/` directory
-- Run VLM recognition on extracted ROIs (if --enable-vlm)
+- Run AIP (template difference) on all ROIs
+- Run VLM recognition on extracted ROIs (if enabled)
 - Save results to `output/` directory
 
 ## Output Files
@@ -115,10 +124,19 @@ For each processed document, you'll get:
 
 ```
 output/
-├── 101_visualization.png        # Color-coded ROI boxes (green=detected, red=missing)
+├── 101_visualization.png        # Color-coded ROI boxes
+│                                 # Green: field_id: True
+│                                 # Red: field_id: False
+│                                 # Blue: field_id: ERROR
 ├── 101_metadata.json            # Processing metadata
-├── VLM_results.json             # Integrated preprocessing + VLM results
-└── vlm_recognition_results.csv  # VLM recognition results (if VLM enabled)
+├── rois/                        # Original extracted ROI images
+│   ├── 101_roi_person1.png
+│   └── ...
+├── processed_rois/              # AIP-processed ROI images (difference)
+│   ├── 101_roi_person1_processed.png
+│   └── ...
+├── VLM_results.json             # Integrated AIP + VLM results
+└── vlm_recognition_results.csv  # CSV export (if VLM enabled)
 ```
 
 ### VLM Results Example (VLM_results.json)
@@ -136,7 +154,7 @@ output/
     "total_documents": 10,
     "successful": 8,
     "failed": 2,
-    "average_processing_time_ms": 15240.3
+    "average_processing_time_ms": 4520.3
   },
   "documents": [
     {
@@ -144,31 +162,33 @@ output/
       "results": true,
       "type": "contractor_1",
       "title": "企業負責人電信信評報告之使用授權書",
-      "processing_timestamp": "2025-12-29T10:30:45",
+      "processing_timestamp": "2025-12-31T15:30:45",
       "fields": {
-        "VX1": {"has_content": false},
-        "VX2": {"has_content": false},
+        "VX1": {
+          "VLM_has_content": false,
+          "AIP_has_content": false
+        },
+        "VX2": {
+          "VLM_has_content": false,
+          "AIP_has_content": false
+        },
         "person1": {
-          "has_content": true,
+          "VLM_has_content": true,
           "content_text": "王小明",
-          "auxiliary_has_content": true,
-          "auxiliary_similarity_score": 0.15
+          "AIP_has_content": true
         },
         "company1": {
-          "has_content": true,
+          "VLM_has_content": true,
           "content_text": "XX科技股份有限公司",
-          "auxiliary_has_content": true,
-          "auxiliary_similarity_score": 0.22
+          "AIP_has_content": true
         },
-        "big": {
-          "has_content": true,
-          "auxiliary_has_content": true,
-          "auxiliary_similarity_score": 0.35
+        "big1": {
+          "VLM_has_content": true,
+          "AIP_has_content": true
         },
-        "small": {
-          "has_content": true,
-          "auxiliary_has_content": true,
-          "auxiliary_similarity_score": 0.28
+        "small1": {
+          "VLM_has_content": true,
+          "AIP_has_content": true
         }
       }
     }
@@ -176,15 +196,58 @@ output/
 }
 ```
 
+### CSV Export Format
+
+When VLM is enabled, results are also exported to `vlm_recognition_results.csv`:
+
+```csv
+document_ID,page_number,template_id,results,processing_timestamp,VX1_VLM_has_content,VX1_AIP_has_content,person1_VLM_has_content,person1_content_text,person1_AIP_has_content,...
+101.jpg,0,contractor_1,True,2025-12-31T15:30:45,False,False,True,王小明,True,...
+```
+
 ## Performance
 
-- **Preprocessing**: ~2-3 seconds per document (CPU)
-- **Auxiliary ROI Comparison**: ~10-30ms per ROI (SIFT feature matching)
-- **VLM Recognition** (runs only on non-empty fields after auxiliary filtering):
-  - GPU (RTX 3060): ~0.1-0.5 seconds per ROI
-  - CPU with INT8: ~1-3 seconds per ROI
-- **Overall Speedup**: 30-50% faster with auxiliary comparison (skips VLM for empty fields)
-- **Feature Caching**: First run computes SIFT features, subsequent runs are 40% faster
+- **Document Alignment**: ~1-2 seconds per document (SIFT matching + homography)
+- **AIP (Template Difference)**: ~10-30ms per ROI
+- **VLM Recognition** (2B model):
+  - GPU (RTX 3060, FP16): ~0.5-1.5 seconds per ROI
+  - GPU (RTX 3060, INT8): ~0.3-0.8 seconds per ROI
+  - CPU (INT8): ~2-4 seconds per ROI
+- **Overall Processing**: ~3-5 seconds per document (with VLM)
+
+## AIP Detection Method
+
+The current AIP uses a simple and effective template difference approach:
+
+1. **ECC Alignment**: Sub-pixel alignment of document ROI to blank template ROI
+2. **BGR Difference**: Absolute pixel difference across all color channels
+3. **Multi-Stage Thresholding**:
+   - Calculate mean difference (0.0-1.0)
+   - For high difference (>0.15): Use significant pixel ratio (>20% with diff>30)
+   - For normal fields: Use mean difference threshold (>0.01)
+
+This method achieves **100% accuracy** on test set with **54% less code** compared to previous complex pipeline.
+
+### Configuration
+
+Only one parameter needs adjustment in `vlm_pdf_recognizer/recognition/config.py`:
+
+```python
+MIN_ABSOLUTE_DENSITY_THRESHOLD = 0.01  # Main threshold for normal fields
+```
+
+For detailed configuration guide, see [CONFIG_GUIDE.md](CONFIG_GUIDE.md).
+
+## Visualization Legend
+
+Output visualizations (`*_visualization.png`) use color-coded bounding boxes:
+
+- **Green boxes**: Content detected
+  - Label format: `field_id: True`
+- **Red boxes**: No content detected
+  - Label format: `field_id: False`
+- **Blue boxes**: AIP error
+  - Label format: `field_id: ERROR`
 
 ## FlashAttention2 (Optional Optimization)
 
@@ -198,14 +261,38 @@ If you see "FlashAttention2 is not installed" warning, you can safely ignore it.
 **Installation requirements:**
 - NVIDIA GPU with CUDA support
 - CUDA Toolkit (nvcc) installed on your system
-- CUDA_HOME environment variable set
 
 **To install (if you have CUDA Toolkit):**
 ```bash
 pip install flash-attn --no-build-isolation
 ```
 
-**Note:** If you only have PyTorch with CUDA runtime (no CUDA Toolkit), FlashAttention2 cannot be installed. Your VLM will still work perfectly fine without it.
+## Project Structure
+
+```
+vlm_pdf_recognizer/
+├── alignment/              # Document alignment (SIFT, homography)
+├── extraction/             # ROI extraction
+├── preprocessing/          # PDF to image conversion
+├── recognition/            # AIP + VLM recognition
+│   ├── config.py           # Configuration (only 4 active parameters)
+│   ├── roi_preprocessor.py # AIP processor (391 lines, -54%)
+│   ├── vlm_recognizer.py   # VLM recognition
+│   ├── vlm_loader.py       # Model loading
+│   ├── field_schema.py     # Field definitions
+│   └── csv_exporter.py     # CSV export
+├── templates/              # Template management
+├── output.py               # Result saving
+└── pipeline.py             # Main processing pipeline
+```
+
+## Recent Optimizations (2025-12-31)
+
+- ✅ Simplified AIP to direct template difference (-54% code)
+- ✅ Removed 14 unused methods, 36 unused parameters
+- ✅ Renamed `preprocessing_*` to `AIP_*` for clarity
+- ✅ Reduced config.py from 225 to 107 lines (-52%)
+- ✅ 100% accuracy maintained with simpler approach
 
 ## License
 
