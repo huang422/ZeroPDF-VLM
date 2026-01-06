@@ -312,6 +312,15 @@ class DocumentRecognitionOutput:
         # Get template schema to check field types
         template_schema = TEMPLATE_SCHEMAS.get(self.template_id)
 
+        # Find version field result (extract to top level, next to title)
+        version_value = None
+        for result in self.field_results:
+            if template_schema:
+                field_schema = template_schema.get_field_by_id(result.field_id)
+                if field_schema and field_schema.field_type == "version":
+                    version_value = result.content_text if result.content_text else ""
+                    break
+
         # Build nested fields dictionary
         fields = {}
         for result in self.field_results:
@@ -324,29 +333,34 @@ class DocumentRecognitionOutput:
             if template_schema:
                 field_schema = template_schema.get_field_by_id(result.field_id)
 
+            # Skip version field (moved to top level, next to title)
+            if field_schema and field_schema.field_type == "version":
+                continue
             # For checkbox/stamp fields, only output has_content (no content_text)
-            if field_schema and field_schema.field_type in ["checkbox", "stamp"]:
+            elif field_schema and field_schema.field_type in ["checkbox", "stamp"]:
                 fields[result.field_id] = {
                     "VLM_has_content": bool(result.has_content) if result.has_content is not None else result.has_content,
                     "AIP_has_content": bool(result.AIP_has_content) if result.AIP_has_content is not None else result.AIP_has_content
                 }
             else:
-                # For text/number fields, output both has_content and content_text
+                # For text/number/person_number fields, output both has_content and content_text
                 fields[result.field_id] = {
                     "VLM_has_content": bool(result.has_content) if result.has_content is not None else result.has_content,
                     "content_text": result.content_text,
                     "AIP_has_content": bool(result.AIP_has_content) if result.AIP_has_content is not None else result.AIP_has_content
                 }
 
-        # Return structured dictionary
-        return {
+        # Return structured dictionary with version at top level (after title)
+        result_dict = {
             "document_ID": str(document_id),
             "results": bool(self.results),
             "type": str(self.template_id),
             "title": str(title_value),
+            "version": str(version_value) if version_value is not None else "",
             "processing_timestamp": self.processing_timestamp.isoformat(),
             "fields": fields
         }
+        return result_dict
 
 
 class VLMRecognizer:
@@ -417,8 +431,9 @@ class VLMRecognizer:
 
         # --- Unified AIP approach for all non-title fields (including checkboxes) ---
         # Step 1: Perform AIP if blank template ROI cache is available (Feature 004)
+        # SKIP AIP for version field - version field always has content, only need VLM recognition
         aip_result = None
-        if blank_template_roi_cache and template_id:
+        if field_schema.field_type != "version" and blank_template_roi_cache and template_id:
             try:
                 from vlm_pdf_recognizer.recognition.roi_preprocessor import ROIPreprocessor
 
