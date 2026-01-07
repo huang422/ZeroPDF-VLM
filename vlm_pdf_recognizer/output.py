@@ -171,10 +171,10 @@ def save_vlm_visualization(result: ProcessingResult, vlm_output, output_dir: str
             color = roi.visualization_color
             label = f"{roi.roi_id}: N/A"
         else:
-            # Color logic (updated with AIP priority):
-            # Priority: AIP_has_content > auxiliary_has_content > has_content
+            # Color logic (updated with AIP priority - Feature 004):
+            # Priority: AIP_has_content (if available) > has_content (VLM inference)
             # - Title fields (has_content=None): Keep original template color
-            # - Checkbox fields: Use heuristic has_content (AIP skipped)
+            # - Checkbox fields: Use AIP_has_content if available, fallback to VLM has_content
             # - Other fields: Use AIP_has_content (green=True, red=False, blue=None/error)
 
             # Check if this is a title field (has_content=None indicates title)
@@ -193,7 +193,7 @@ def save_vlm_visualization(result: ProcessingResult, vlm_output, output_dir: str
                     else:
                         color = (0, 0, 255)  # RED
                         label = f"{roi.roi_id}: False"
-                elif field_result.AIP_has_content is None and hasattr(field_result, 'AIP_time_ms') and field_result.AIP_time_ms is not None:
+                elif field_result.AIP_has_content is None and field_result.AIP_time_ms is not None:
                     # AIP ran but returned None (error case)
                     color = (255, 0, 0)  # BLUE
                     label = f"{roi.roi_id}: ERROR"
@@ -377,110 +377,3 @@ def save_batch_summary_with_vlm(results: List[ProcessingResult], vlm_results: Li
         print(f"   Warning: CSV export failed: {csv_error}")
 
     return str(summary_path)
-
-
-def append_vlm_recognition_result(vlm_result, output_dir: str, filename: str = "vlm_recognition_results.json"):
-    """
-    Append a single VLM recognition result to existing JSON file.
-
-    Args:
-        vlm_result: DocumentRecognitionOutput object
-        output_dir: Directory containing JSON
-        filename: JSON filename (default: vlm_recognition_results.json)
-
-    Raises:
-        IOError: If file append fails
-    """
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    json_path = output_path / filename
-
-    # Load existing data if file exists
-    if json_path.exists():
-        with open(json_path, 'r', encoding='utf-8') as f:
-            existing_data = json.load(f)
-    else:
-        existing_data = []
-
-    # Append new result
-    new_result = vlm_result.to_json_dict()
-    existing_data.append(new_result)
-
-    # Write back to file
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(existing_data, f, indent=2, ensure_ascii=False)
-
-    return str(json_path)
-
-
-def validate_vlm_json_structure(json_path: str, template_id: str) -> bool:
-    """
-    Validate JSON structure matches expected template schema.
-
-    Args:
-        json_path: Path to JSON file to validate
-        template_id: Template ID to validate against
-
-    Returns:
-        True if validation passes, False otherwise
-    """
-    try:
-        from vlm_pdf_recognizer.recognition.field_schema import TEMPLATE_SCHEMAS
-
-        # Load JSON file
-        with open(json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-
-        # Check if data is a list
-        if not isinstance(data, list) or len(data) == 0:
-            return False
-
-        # Validate first record
-        record = data[0]
-
-        # Expected metadata fields
-        expected_metadata = ["document_ID", "results", "type", "title", "processing_timestamp", "fields"]
-
-        # Check metadata fields exist
-        for field in expected_metadata:
-            if field not in record:
-                return False
-
-        # Get template schema
-        if template_id not in TEMPLATE_SCHEMAS:
-            return False
-
-        template_schema = TEMPLATE_SCHEMAS[template_id]
-
-        # Check fields structure
-        if not isinstance(record["fields"], dict):
-            return False
-
-        # Check that all non-title fields are present
-        for field in template_schema.field_schemas:
-            # Skip title field
-            if field.field_type == "title":
-                continue
-
-            if field.field_id not in record["fields"]:
-                return False
-
-            # Check field has has_content
-            field_data = record["fields"][field.field_id]
-            if "has_content" not in field_data:
-                return False
-
-            # checkbox/stamp fields should NOT have content_text
-            # text/number fields SHOULD have content_text
-            if field.field_type in ["checkbox", "stamp"]:
-                if "content_text" in field_data:
-                    return False
-            else:
-                if "content_text" not in field_data:
-                    return False
-
-        return True
-
-    except Exception:
-        return False

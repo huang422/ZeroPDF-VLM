@@ -5,8 +5,10 @@ import os
 import sys
 import argparse
 from pathlib import Path
-from vlm_pdf_recognizer.pipeline import DocumentProcessor
+from datetime import datetime
+from vlm_pdf_recognizer.pipeline import DocumentProcessor, ProcessingResult
 from vlm_pdf_recognizer.output import save_result, save_batch_summary, save_batch_summary_with_vlm, save_vlm_visualization
+from vlm_pdf_recognizer.recognition.vlm_recognizer import DocumentRecognitionOutput
 
 def main():
     """Process all files in input/ directory and save to output/."""
@@ -188,8 +190,6 @@ def main():
                         except Exception as vlm_error:
                             print(f"   Warning: VLM recognition failed: {vlm_error}")
                             # Create error result for failed VLM recognition
-                            from vlm_pdf_recognizer.recognition.vlm_recognizer import DocumentRecognitionOutput
-                            from datetime import datetime
                             error_vlm_output = DocumentRecognitionOutput(
                                 document_name=Path(result.input_path).name,
                                 page_number=result.page_number,
@@ -206,8 +206,6 @@ def main():
 
                     # Create error VLM result for failed preprocessing
                     if args.enable_vlm and vlm_recognizer:
-                        from vlm_pdf_recognizer.recognition.vlm_recognizer import DocumentRecognitionOutput
-                        from datetime import datetime
                         error_vlm_output = DocumentRecognitionOutput(
                             document_name=Path(result.input_path).name,
                             page_number=result.page_number,
@@ -222,7 +220,6 @@ def main():
         except Exception as e:
             print(f"   Error: {str(e)}")
             # Create error result
-            from vlm_pdf_recognizer.pipeline import ProcessingResult
             import numpy as np
             error_result = ProcessingResult(
                 input_path=str(input_file),
@@ -240,8 +237,6 @@ def main():
 
             # Create error VLM result for exception cases
             if args.enable_vlm and vlm_recognizer:
-                from vlm_pdf_recognizer.recognition.vlm_recognizer import DocumentRecognitionOutput
-                from datetime import datetime
                 error_vlm_output = DocumentRecognitionOutput(
                     document_name=input_file.name,
                     page_number=0,
@@ -295,7 +290,6 @@ def main():
         print(f"   - Visualizations: *_visualization.png (with color-coded results)")
         print(f"     • Green boxes: Content detected (field_id: True)")
         print(f"     • Red boxes: No content (field_id: False)")
-        print(f"     • Blue boxes: AIP error (field_id: ERROR)")
     else:
         print(f"   - Visualizations: *_visualization.png")
     print(f"   - ROI images: rois/*_roi_*.png")

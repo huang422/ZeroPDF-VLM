@@ -13,6 +13,7 @@ import json
 import time
 import os
 
+import cv2
 import numpy as np
 import torch
 import torchvision.transforms as T
@@ -538,8 +539,6 @@ class VLMRecognizer:
             - binary_image_for_heuristic: Grayscale binary image (0/255) for pixel counting
             - enhanced_bgr_for_vlm: BGR version for VLM input
         """
-        import cv2
-
         # Convert to grayscale
         gray = cv2.cvtColor(roi_image, cv2.COLOR_BGR2GRAY)
 
@@ -609,9 +608,6 @@ class VLMRecognizer:
             RuntimeError: If conversion fails
         """
         try:
-            import cv2
-            from PIL import Image
-
             # Convert BGR to RGB
             rgb_array = cv2.cvtColor(opencv_image, cv2.COLOR_BGR2RGB)
 
