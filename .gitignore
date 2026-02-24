@@ -35,13 +35,17 @@ env/
 
 # Project specific
 output/*
+!output/.gitkeep
 *.pkl
 *.pyc
 data/*/template_features.pkl
 data/*
+!data/.gitkeep
 input/*
+!input/.gitkeep
 templates/images/
 templates/location/
+!templates/.gitkeep
 prompt.md
 CLAUDE.md
 tests/
