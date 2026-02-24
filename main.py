@@ -7,10 +7,13 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
+
+import numpy as np
+
 from vlm_pdf_recognizer.pipeline import DocumentProcessor, ProcessingResult
 from vlm_pdf_recognizer.output import (
     save_result, save_batch_summary, save_batch_summary_with_vlm,
-    save_vlm_visualization
+    save_vlm_visualization, save_preprocessed_rois
 )
 from vlm_pdf_recognizer.recognition.vlm_recognizer import DocumentRecognitionOutput
 
@@ -216,7 +219,6 @@ def main():
 
                             # Save original and AIP-processed ROI images
                             try:
-                                from vlm_pdf_recognizer.output import save_preprocessed_rois
                                 save_preprocessed_rois(result, vlm_output, case_output_dir)
                                 print(f"   Original ROI images saved to: {case_output_dir}/rois/")
                                 print(f"   AIP-processed ROI images saved to: {case_output_dir}/processed_rois/")
@@ -265,7 +267,6 @@ def main():
         except Exception as e:
             print(f"   Error: {str(e)}")
             # Create error result
-            import numpy as np
             error_result = ProcessingResult(
                 input_path=str(input_file),
                 page_number=0,
@@ -296,20 +297,49 @@ def main():
 
         print()
 
-    # Save VLM results (with VLM results if enabled)
+    # Save VLM results per date directory
     print("=" * 70)
     print("Saving VLM results...")
     print("=" * 70)
 
+    # Group results by date
+    date_all_results = defaultdict(list)
+    date_vlm_results = defaultdict(list)
+
+    for result in all_results:
+        # Extract date from output path: input_path contains the date directory
+        rel_path = Path(result.input_path)
+        # input/date/case_id/file -> date is 2nd component
+        parts = rel_path.parts
+        # Find the date part (parent of case_id, which is parent of file)
+        date_name = parts[-3] if len(parts) >= 3 else "unknown"
+        date_all_results[date_name].append(result)
+
     if args.enable_vlm and vlm_results:
-        # Save integrated summary with VLM recognition results (including case-level aggregation)
-        summary_path = save_batch_summary_with_vlm(all_results, vlm_results, output_dir)
-        print(f"   VLM_results saved with recognition results: {summary_path}")
-        print(f"   Total VLM records: {len(vlm_results)}")
-    else:
-        # Save preprocessing-only summary
-        save_batch_summary(all_results, output_dir)
-        print(f"   VLM_results saved (preprocessing only)")
+        for vlm_result in vlm_results:
+            # Find the date for this vlm_result by matching document_name in file_entries
+            date_name = "unknown"
+            for file_path, d_name, c_id in file_entries:
+                if file_path.name == vlm_result.document_name and c_id == vlm_result.case_id:
+                    date_name = d_name
+                    break
+            date_vlm_results[date_name].append(vlm_result)
+
+    # Save per date directory
+    all_dates = set(date_all_results.keys()) | set(date_vlm_results.keys())
+    for date_name in sorted(all_dates):
+        date_output_dir = os.path.join(output_dir, date_name)
+        os.makedirs(date_output_dir, exist_ok=True)
+
+        d_all = date_all_results.get(date_name, [])
+        d_vlm = date_vlm_results.get(date_name, [])
+
+        if args.enable_vlm and d_vlm:
+            summary_path = save_batch_summary_with_vlm(d_all, d_vlm, date_output_dir)
+            print(f"   [{date_name}] VLM_results saved: {summary_path} ({len(d_vlm)} records)")
+        else:
+            save_batch_summary(d_all, date_output_dir)
+            print(f"   [{date_name}] VLM_results saved (preprocessing only)")
 
     # Print final summary
     print()
@@ -340,9 +370,9 @@ def main():
         print(f"   - Visualizations: *_visualization.png")
     print(f"   - ROI images: rois/*_roi_*.png")
     print(f"   - Metadata: metadata/*_metadata.json")
-    print(f"   - VLM results: VLM_results.json")
+    print(f"   - VLM results: {{date}}/VLM_results.json")
     if args.enable_vlm and vlm_results:
-        print(f"   - VLM recognition CSV: vlm_recognition_results.csv")
+        print(f"   - VLM recognition CSV: {{date}}/vlm_recognition_results.csv")
     print()
 
     # VLM recognition summary with case-level results

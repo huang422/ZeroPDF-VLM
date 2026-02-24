@@ -44,6 +44,7 @@ templates/images/
 templates/location/
 prompt.md
 CLAUDE.md
+tests/
 
 # Logs
 *.log

@@ -14,7 +14,6 @@ This simplified approach focuses on direct color difference rather than complex
 morphological operations or density maps.
 """
 
-import os
 import json
 import time
 import logging
@@ -32,10 +31,6 @@ import numpy as np
 MIN_ABSOLUTE_DENSITY_THRESHOLD = 0.01
 # PNG compression level for debug images (0=fast/large, 9=slow/small)
 PNG_COMPRESSION_LEVEL = 6
-# Pre-allocate work buffers for preprocessing pipeline
-PRE_ALLOCATE_WORK_BUFFERS = True
-# Maximum ROI dimension (width or height) for buffer pre-allocation
-MAX_ROI_DIMENSION = 1000
 
 
 logger = logging.getLogger(__name__)
@@ -92,14 +87,6 @@ class ROIPreprocessor:
         # Create output directory if needed
         if self.save_debug_images and self.output_dir:
             self.output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Pre-allocate work buffers if configured
-        self.work_buffers = {}
-        if PRE_ALLOCATE_WORK_BUFFERS:
-            max_dim = MAX_ROI_DIMENSION
-            self.work_buffers['gray'] = np.zeros((max_dim, max_dim), dtype=np.uint8)
-            self.work_buffers['binary'] = np.zeros((max_dim, max_dim), dtype=np.uint8)
-            self.work_buffers['float'] = np.zeros((max_dim, max_dim), dtype=np.float32)
 
     def preprocess_roi(
         self,

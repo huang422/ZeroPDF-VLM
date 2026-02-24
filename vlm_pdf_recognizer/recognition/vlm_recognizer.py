@@ -254,10 +254,11 @@ class VLMRecognizer:
 
         Args:
             client: OllamaClient instance
-            tokenizer: Not used (kept for API compatibility), pass None
+            tokenizer: Not used (Ollama handles tokenization), pass None
             template_schemas: Dictionary mapping template_id to TemplateSchema
         """
         self.client = client
+        # tokenizer is not used - Ollama handles tokenization internally
         self.template_schemas = template_schemas
 
         # Get config from VLMLoader singleton for model settings
@@ -425,12 +426,12 @@ class VLMRecognizer:
             image_b64 = self._encode_image_base64(roi_image)
 
             # Step 2: Call Ollama generate API with image
+            from .vlm_loader import DEFAULT_MODEL_NAME
+
             model_name = self._config.model_name if self._config else DEFAULT_MODEL_NAME
             temperature = self._config.temperature if self._config else 0.0
             num_predict = self._config.num_predict if self._config else 256
             num_gpu = self._config.num_gpu if self._config else -1
-
-            from .vlm_loader import DEFAULT_MODEL_NAME
 
             response = self.client.generate(
                 model=model_name,

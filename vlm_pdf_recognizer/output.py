@@ -280,36 +280,6 @@ def save_batch_summary(results: List[ProcessingResult], output_dir: str):
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
 
-def save_vlm_recognition_results(vlm_results: List, output_dir: str, filename: str = "vlm_recognition_results.json"):
-    """
-    Save VLM recognition results to JSON file.
-
-    Args:
-        vlm_results: List of DocumentRecognitionOutput objects
-        output_dir: Directory to save JSON
-        filename: JSON filename (default: vlm_recognition_results.json)
-
-    Raises:
-        ValueError: If vlm_results list is empty
-        IOError: If file writing fails
-    """
-    if not vlm_results:
-        raise ValueError("Cannot export empty VLM results list to JSON")
-
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    # Convert results to list of dictionaries
-    results_data = [result.to_json_dict() for result in vlm_results]
-
-    # Write to JSON with UTF-8 encoding
-    json_path = output_path / filename
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(results_data, f, indent=2, ensure_ascii=False)
-
-    return str(json_path)
-
-
 def save_batch_summary_with_vlm(results: List[ProcessingResult], vlm_results: List, output_dir: str):
     """
     Save batch processing summary with integrated VLM recognition results

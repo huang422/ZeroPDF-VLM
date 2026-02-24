@@ -1,145 +1,223 @@
 # VLM PDF Recognizer
 
-Local, zero-shot document processing system for Traditional Chinese scanned PDF documents with template-based classification, alignment, ROI extraction, and VLM-powered content recognition.
+A local, privacy-first document processing system that combines computer vision alignment with Vision Language Model (VLM) inference for zero-shot content recognition on Traditional Chinese scanned documents.
 
-## Features
+> **No cloud services. No training data. No fine-tuning.**
+> Drop in scanned PDFs, get structured field extraction results in seconds.
 
-### Document Processing
-- **Template Classification**: Automatically identifies document type (enterprise_1, contractor_1, contractor_2)
-- **Watermark Removal**: HSV thresholding to remove blue, gray, and light red watermarks
-- **Geometric Alignment**: SIFT feature matching with homography transformation
-- **ROI Extraction**: Extracts predefined regions of interest with bounding box visualization
+---
 
-### AIP (Advanced Image Processing) - ROI Content Detection
-- **Template Difference**: Direct BGR pixel difference with ECC sub-pixel alignment
-- **Multi-Stage Thresholding**: Adaptive threshold for pre-printed text handling
-- **Fast Detection**: ~10-30ms per ROI (template difference-based)
-- **High Accuracy**: 100% detection rate on test set (26 ROIs)
-- **Pre-VLM Filtering**: Skips VLM inference for confirmed empty fields, reducing processing time
+## Overview
 
-### VLM Recognition (InternVLM 3.5-2B)
-- **Zero-Shot Content Recognition**: Detects checkbox marks, stamps, and extracts text content without training
-- **Field-Specific Prompts**: Customized Traditional Chinese prompts for different field types
-- **Smart Output**: Checkbox/stamp fields output only presence (True/False), text fields include extracted content
-- **Validation Logic**: Automatic document validation based on required fields and VX disagreement detection
-- **Compact Model**: 2B parameter model for efficient processing
+VLM PDF Recognizer processes scanned PDF documents through a multi-stage pipeline: **template matching** identifies the document type, **geometric alignment** corrects perspective distortion, **ROI extraction** isolates predefined fields, **AIP preprocessing** detects content presence via pixel-level template differencing, and **VLM recognition** extracts text from populated fields using a local Ollama-hosted model.
 
-### System Features
-- **Dual Detection**: AIP (template difference) + VLM (content recognition)
-- **Batch Processing**: Process entire directories with integrated results
-- **GPU Acceleration**: Automatic GPU/CPU detection with INT8/INT4 quantization fallback
-- **JSON Output**: Structured VLM_results.json with AIP and VLM recognition statistics
-- **Color-Coded Visualization**:
-  - Green boxes: Content detected (field_id: True)
-  - Red boxes: No content (field_id: False)
-  - Blue boxes: AIP error (field_id: ERROR)
-- **Adaptive Precision**: Automatically selects optimal precision (BF16/FP16/INT8/INT4) based on available VRAM
+The system is designed for batch processing of structured documents where fields occupy known locations across a small set of document templates.
 
-## Requirements
+### Pipeline Architecture
 
-- Python 3.9+
-- OpenCV 4.x
-- PyTorch 2.0+ (for VLM only)
-- Transformers 4.52.1+ (HuggingFace, for VLM only)
-- **6-8GB VRAM** (GPU mode with FP16) or **16GB+ RAM** (CPU mode with INT8 quantization)
+```
+Scanned PDF / Image
+       │
+       ▼
+┌──────────────────┐
+│  PDF → BGR Image │  PyMuPDF conversion, preserving original dimensions
+└────────┬─────────┘
+         ▼
+┌──────────────────┐
+│  SIFT Feature    │  Scale-invariant keypoint detection
+│  Extraction      │  Templates: unlimited features, Documents: capped at 5000
+└────────┬─────────┘
+         ▼
+┌──────────────────┐
+│  Template Voting │  FLANN + Lowe's ratio test → RANSAC homography
+│  & Classification│  Winner = template with max inliers (min 50 required)
+└────────┬─────────┘
+         ▼
+┌──────────────────┐
+│  Geometric       │  Perspective warp via homography matrix
+│  Alignment       │  Output matches template pixel dimensions exactly
+└────────┬─────────┘
+         ▼
+┌──────────────────┐
+│  ROI Extraction  │  Crop predefined field regions from aligned image
+└────────┬─────────┘
+         ▼
+┌───────────────────────────────────────────────┐
+│  Two-Stage Content Detection                  │
+│                                               │
+│  Stage 1: AIP (Advanced Image Processing)     │
+│  ┌─────────────────────────────────────────┐  │
+│  │ ECC sub-pixel alignment to blank ROI    │  │
+│  │ BGR channel difference computation      │  │
+│  │ Multi-stage thresholding:               │  │
+│  │   • Mean diff > 0.01 → content present  │  │
+│  │   • Mean diff > 0.15 → pre-printed text │  │
+│  │     → check significant pixel ratio     │  │
+│  │ Result: has_content (bool), ~10-30ms    │  │
+│  └─────────────────────────────────────────┘  │
+│                                               │
+│  Stage 2: VLM Recognition (Ollama glm-ocr)    │
+│  ┌─────────────────────────────────────────┐  │
+│  │ Field-specific prompts per ROI type     │  │
+│  │ Base64 image → Ollama HTTP API          │  │
+│  │ Post-processing:                        │  │
+│  │   • Prompt echo removal                 │  │
+│  │   • Simplified → Traditional Chinese    │  │
+│  │   • JSON response parsing               │  │
+│  │ Result: content_text, ~0.5-1.5s/ROI     │  │
+│  └─────────────────────────────────────────┘  │
+└──────────────────┬────────────────────────────┘
+                   ▼
+┌───────────────────────────────────────┐
+│  Output: JSON + CSV + Visualization   │
+│  Case-level & document-level results  │
+│  Color-coded ROI bounding boxes       │
+└───────────────────────────────────────┘
+```
+
+---
+
+## Key Features
+
+### Template-Based Document Classification
+- SIFT feature extraction with FLANN nearest-neighbor matching
+- RANSAC-based homography estimation with voting mechanism
+- Minimum 50 inlier threshold for reliable classification
+- Supports multiple document templates simultaneously
+
+### Geometric Alignment
+- Perspective correction via homography transformation
+- Aligned output matches template dimensions pixel-for-pixel
+- Enables precise ROI extraction regardless of scan angle or position
+
+### AIP (Advanced Image Processing) Content Detection
+- ECC sub-pixel alignment between document ROI and blank template reference
+- BGR channel difference with multi-stage adaptive thresholding
+- Handles pre-printed text fields (high baseline difference) separately from handwritten content
+- ~10-30ms per ROI, enabling fast pre-screening before VLM inference
+
+### VLM-Powered Content Extraction
+- Ollama-hosted `glm-ocr` model for local, GPU-accelerated inference
+- Zero-shot recognition: no training or fine-tuning required
+- Field-type-specific prompts optimized for:
+  - **Checkboxes** — presence detection (checked/unchecked)
+  - **Stamps/Seals** — presence and text extraction
+  - **Text fields** — Traditional Chinese character extraction
+  - **Number fields** — digit extraction (dates, ID numbers, version codes)
+  - **Person number** — Taiwan national ID format (1 letter + 9 digits)
+- Automatic Simplified → Traditional Chinese conversion via OpenCC
+
+### Batch Processing with Nested Directory Support
+- Input structure: `input/{date}/{case_id}/*.pdf`
+- Output mirrors input: `output/{date}/{case_id}/`
+- Case-level aggregation: a case passes only if all its documents pass
+- CSV export for downstream analysis
+
+### Document Validation Logic
+- **VX1 priority rule**: if disagreement checkbox is checked → document fails
+- **Date fields (OR logic)**: at least one of year/month/date must have content
+- **Required fields (AND logic)**: all non-date, non-checkbox, non-version fields must have content
+
+---
+
+## System Requirements
+
+| Component | Requirement |
+|-----------|-------------|
+| Python | 3.9+ |
+| GPU | NVIDIA GPU with 6+ GB VRAM (recommended) |
+| Ollama | Installed and running on `localhost:11434` |
+| Model | `glm-ocr` (auto-pulled on first run if not present) |
+| OS | Linux / Windows / macOS |
+
+**Tested on:** RTX 4080 Laptop (12.5 GB VRAM), Ubuntu Linux
+
+---
 
 ## Installation
 
 ```bash
-# Clone repository
+# Clone the repository
+git clone https://github.com/your-org/VLM-pdfRecognizer.git
 cd VLM-pdfRecognizer
 
-# Create virtual environment (recommended)
+# Create conda environment
 conda create -n vlmcv python=3.9
 conda activate vlmcv
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Install Ollama (if not already installed)
+# See: https://ollama.com/download
+
+# Pull the VLM model
+ollama pull glm-ocr
 ```
 
-**Note**: InternVL 3.5-2B model (~4-6GB) will be automatically downloaded from HuggingFace on first run.
+### Dependencies
+
+```
+opencv-python>=4.8.0              # Image processing & SIFT features
+numpy>=1.24.0                     # Array operations
+PyMuPDF>=1.23.0                   # PDF → image conversion
+requests>=2.28.0                  # Ollama HTTP API client
+Pillow>=10.0.0                    # Image I/O utilities
+opencc-python-reimplemented       # Simplified → Traditional Chinese
+```
+
+Optional: `torch` (GPU VRAM auto-detection; falls back to `nvidia-smi` if absent)
+
+---
 
 ## Quick Start
 
-### 1. Directory Structure
-
-```
-VLM-pdfRecognizer/
-├── templates/
-│   ├── images/              # Template images
-│   │   ├── enterprise_1.jpg
-│   │   ├── contractor_1.jpg
-│   │   └── contractor_2.jpg
-│   └── location/            # LabelMe ROI annotations
-│       ├── enterprise_1.json
-│       ├── contractor_1.json
-│       └── contractor_2.json
-├── data/                    # Auto-generated configs
-│   ├── enterprise_1/
-│   │   ├── config.json
-│   │   ├── template_features.pkl (cached)
-│   │   └── blank_rois/          # Blank ROI reference images for AIP
-│   ├── contractor_1/...
-│   └── contractor_2/...
-├── input/                   # Put your documents here
-│   ├── 101.jpg
-│   ├── 104.jpg
-│   └── ...
-└── output/                  # Processing results
-```
-
-### 2. Generate Config Files (First Time Only)
+### 1. Generate Configuration Files (First Time)
 
 ```bash
 python update_configs.py
 ```
 
-This script:
-- Reads annotations from `templates/location/*.json`
-- Generates `data/*/config.json` for each template
-- Extracts blank ROI images for AIP template difference
+This reads LabelMe annotations from `templates/location/` and generates:
+- `data/{template_id}/config.json` — ROI coordinates
+- `data/{template_id}/blank_rois/*.png` — blank reference images for AIP
+- `vlm_pdf_recognizer/recognition/field_schema.py` — field definitions and prompts
 
-### 3. Run Processing
+### 2. Start Ollama Server
 
-**With VLM content recognition (default)**:
 ```bash
-python main.py
+ollama serve
 ```
 
-**Without VLM (AIP only)**:
+### 3. Run the Pipeline
+
 ```bash
+# Full pipeline (AIP + VLM)
+python main.py
+
+# AIP only (skip VLM inference)
 python main.py --disable-vlm
 ```
 
-That's it! The program will:
-- Load all templates from `templates/images/`
-- Process all files in `input/` directory
-- Run AIP (template difference) on all ROIs
-- Run VLM recognition on extracted ROIs (if enabled)
-- Save results to `output/` directory
-
-## Output Files
-
-For each processed document, you'll get:
+### 4. Check Results
 
 ```
 output/
-├── 101_visualization.png        # Color-coded ROI boxes
-│                                 # Green: field_id: True
-│                                 # Red: field_id: False
-│                                 # Blue: field_id: ERROR
-├── 101_metadata.json            # Processing metadata
-├── rois/                        # Original extracted ROI images
-│   ├── 101_roi_person1.png
-│   └── ...
-├── processed_rois/              # AIP-processed ROI images (difference)
-│   ├── 101_roi_person1_processed.png
-│   └── ...
-├── VLM_results.json             # Integrated AIP + VLM results
-└── vlm_recognition_results.csv  # CSV export (if VLM enabled)
+└── {date}/
+    ├── VLM_results.json                         # Aggregated results for this date
+    ├── vlm_recognition_results.csv              # Tabular export for this date
+    └── {case_id}/
+        ├── {doc}_visualization.png              # Color-coded ROI boxes
+        ├── metadata/{doc}_metadata.json         # Processing metadata
+        ├── rois/{doc}_roi_{field}.png            # Extracted ROI images
+        └── processed_rois/{doc}_roi_{field}_processed.png  # AIP diff images
 ```
 
-### VLM Results Example (VLM_results.json)
+---
+
+## Output Format
+
+### VLM_results.json
 
 ```json
 {
@@ -148,7 +226,11 @@ output/
     "successful": 10,
     "failed": 0,
     "average_processing_time_ms": 2341.5,
-    "template_distribution": {"contractor_1": 5, "contractor_2": 3, "enterprise_1": 2}
+    "template_distribution": {
+      "contractor_1": 5,
+      "contractor_2": 3,
+      "enterprise_1": 2
+    }
   },
   "vlm_recognition": {
     "total_documents": 10,
@@ -156,144 +238,181 @@ output/
     "failed": 2,
     "average_processing_time_ms": 4520.3
   },
+  "case_results": {
+    "case_a101": {
+      "case_results": true,
+      "document_count": 2,
+      "valid_count": 2
+    }
+  },
   "documents": [
     {
-      "document_ID": "101.jpg",
+      "document_ID": "doc1.pdf",
       "results": true,
       "type": "contractor_1",
-      "title": "企業負責人電信信評報告之使用授權書",
-      "processing_timestamp": "2025-12-31T15:30:45",
+      "case_id": "case_a101",
       "fields": {
-        "VX1": {
-          "VLM_has_content": false,
-          "AIP_has_content": false
-        },
-        "VX2": {
-          "VLM_has_content": false,
-          "AIP_has_content": false
-        },
-        "person1": {
-          "VLM_has_content": true,
-          "content_text": "王小明",
-          "AIP_has_content": true
-        },
-        "company1": {
-          "VLM_has_content": true,
-          "content_text": "XX科技股份有限公司",
-          "AIP_has_content": true
-        },
-        "big1": {
-          "VLM_has_content": true,
-          "AIP_has_content": true
-        },
-        "small1": {
-          "VLM_has_content": true,
-          "AIP_has_content": true
-        }
+        "VX1": { "has_content": false },
+        "person1": { "has_content": true, "content_text": "王小明" },
+        "big1": { "has_content": true }
       }
     }
   ]
 }
 ```
 
-### CSV Export Format
+### Visualization Color Code
 
-When VLM is enabled, results are also exported to `vlm_recognition_results.csv`:
+| Color | Meaning |
+|-------|---------|
+| Green | Content detected (`has_content: true`) |
+| Red | No content (`has_content: false`) |
+| Blue | Detection unavailable (`has_content: null`) |
 
-```csv
-document_ID,page_number,template_id,results,processing_timestamp,VX1_VLM_has_content,VX1_AIP_has_content,person1_VLM_has_content,person1_content_text,person1_AIP_has_content,...
-101.jpg,0,contractor_1,True,2025-12-31T15:30:45,False,False,True,王小明,True,...
-```
-
-## Performance
-
-- **Document Alignment**: ~1-2 seconds per document (SIFT matching + homography)
-- **AIP (Template Difference)**: ~10-30ms per ROI
-- **VLM Recognition** (2B model):
-  - GPU (RTX 3060, FP16): ~0.5-1.5 seconds per ROI
-  - GPU (RTX 3060, INT8): ~0.3-0.8 seconds per ROI
-  - CPU (INT8): ~2-4 seconds per ROI
-- **Overall Processing**: ~3-5 seconds per document (with VLM)
-
-## AIP Detection Method
-
-The current AIP uses a simple and effective template difference approach:
-
-1. **ECC Alignment**: Sub-pixel alignment of document ROI to blank template ROI
-2. **BGR Difference**: Absolute pixel difference across all color channels
-3. **Multi-Stage Thresholding**:
-   - Calculate mean difference (0.0-1.0)
-   - For high difference (>0.15): Use significant pixel ratio (>20% with diff>30)
-   - For normal fields: Use mean difference threshold (>0.01)
-
-This method achieves **100% accuracy** on test set with **54% less code** compared to previous complex pipeline.
-
-### Configuration
-
-Only one parameter needs adjustment in `vlm_pdf_recognizer/recognition/config.py`:
-
-```python
-MIN_ABSOLUTE_DENSITY_THRESHOLD = 0.01  # Main threshold for normal fields
-```
-
-For detailed configuration guide, see [CONFIG_GUIDE.md](CONFIG_GUIDE.md).
-
-## Visualization Legend
-
-Output visualizations (`*_visualization.png`) use color-coded bounding boxes:
-
-- **Green boxes**: Content detected
-  - Label format: `field_id: True`
-- **Red boxes**: No content detected
-  - Label format: `field_id: False`
-- **Blue boxes**: AIP error
-  - Label format: `field_id: ERROR`
-
-## FlashAttention2 (Optional Optimization)
-
-If you see "FlashAttention2 is not installed" warning, you can safely ignore it. FlashAttention2 is an optional optimization for faster attention computation but is **not required** for the VLM to function correctly.
-
-**Benefits of installing FlashAttention2:**
-- 2-4x faster VLM inference speed
-- 20-40% lower GPU memory usage
-- Does NOT improve recognition accuracy (only speeds up computation)
-
-**Installation requirements:**
-- NVIDIA GPU with CUDA support
-- CUDA Toolkit (nvcc) installed on your system
-
-**To install (if you have CUDA Toolkit):**
-```bash
-pip install flash-attn --no-build-isolation
-```
+---
 
 ## Project Structure
 
 ```
-vlm_pdf_recognizer/
-├── alignment/              # Document alignment (SIFT, homography)
-├── extraction/             # ROI extraction
-├── preprocessing/          # PDF to image conversion
-├── recognition/            # AIP + VLM recognition
-│   ├── config.py           # Configuration (only 4 active parameters)
-│   ├── roi_preprocessor.py # AIP processor (391 lines, -54%)
-│   ├── vlm_recognizer.py   # VLM recognition
-│   ├── vlm_loader.py       # Model loading
-│   ├── field_schema.py     # Field definitions
-│   └── csv_exporter.py     # CSV export
-├── templates/              # Template management
-├── output.py               # Result saving
-└── pipeline.py             # Main processing pipeline
+VLM-pdfRecognizer/
+│
+├── main.py                          # Entry point & batch orchestrator
+├── update_configs.py                # Config generator (LabelMe → config.json + field_schema.py)
+├── requirements.txt
+│
+├── templates/
+│   ├── images/                      # Golden template images (.jpg)
+│   └── location/                    # LabelMe annotation files (.json)
+│
+├── data/                            # Auto-generated by update_configs.py
+│   └── {template_id}/
+│       ├── config.json              # ROI coordinates & metadata
+│       ├── template_features.pkl    # Cached SIFT descriptors
+│       └── blank_rois/              # Blank ROI reference images
+│
+├── input/                           # Place documents here
+│   └── {date}/{case_id}/*.pdf
+│
+├── output/                          # Processing results
+│
+└── vlm_pdf_recognizer/
+    ├── pipeline.py                  # DocumentProcessor: orchestrates full pipeline
+    ├── output.py                    # Result serialization, visualization, CSV
+    │
+    ├── preprocessing/
+    │   └── pdf_converter.py         # PDF → BGR image array (PyMuPDF)
+    │
+    ├── alignment/
+    │   ├── feature_extractor.py     # SIFT keypoint & descriptor extraction
+    │   ├── template_matcher.py      # FLANN matching + RANSAC voting
+    │   ├── geometric_corrector.py   # Homography-based perspective warp
+    │   └── blank_template_roi_cache.py  # In-memory cache for blank ROI references
+    │
+    ├── extraction/
+    │   └── roi_extractor.py         # ROI cropping & bounding box drawing
+    │
+    ├── recognition/
+    │   ├── vlm_loader.py            # Ollama client (singleton, auto GPU detection)
+    │   ├── vlm_recognizer.py        # VLM inference, post-processing, validation
+    │   ├── roi_preprocessor.py      # AIP: ECC alignment + BGR differencing
+    │   ├── field_schema.py          # Field definitions & prompt templates (auto-generated)
+    │   └── csv_exporter.py          # Flat CSV export
+    │
+    └── templates/
+        ├── __init__.py              # ROI & GoldenTemplate dataclasses
+        ├── template_loader.py       # Load templates, configs, features
+        └── template_cache.py        # SIFT feature serialization & cache invalidation
 ```
 
-## Recent Optimizations (2025-12-31)
+### Module Responsibilities
 
-- ✅ Simplified AIP to direct template difference (-54% code)
-- ✅ Removed 14 unused methods, 36 unused parameters
-- ✅ Renamed `preprocessing_*` to `AIP_*` for clarity
-- ✅ Reduced config.py from 225 to 107 lines (-52%)
-- ✅ 100% accuracy maintained with simpler approach
+| Module | Role |
+|--------|------|
+| `pipeline.py` | Orchestrates preprocessing: PDF conversion → SIFT → template match → alignment → ROI extraction |
+| `vlm_recognizer.py` | Runs AIP + VLM on extracted ROIs, aggregates per-document results, applies validation rules |
+| `roi_preprocessor.py` | AIP engine: ECC-aligned BGR differencing against blank template ROIs |
+| `vlm_loader.py` | Singleton Ollama HTTP client with hardware auto-detection and model availability checks |
+| `field_schema.py` | Central registry of field metadata, types, and VLM prompt templates (auto-generated) |
+| `template_matcher.py` | FLANN + RANSAC voting to classify documents and compute homography matrices |
+| `output.py` | Saves visualizations, metadata JSON, ROI images, and batch summary |
+| `csv_exporter.py` | Flattens recognition results into a single CSV with case-level aggregation |
+| `update_configs.py` | One-time generator: LabelMe annotations → config.json + blank_rois + field_schema.py |
+
+---
+
+## Configuration & Tuning
+
+### AIP Thresholds (`roi_preprocessor.py`)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `MIN_ABSOLUTE_DENSITY_THRESHOLD` | 0.01 | Mean BGR difference above which a field is considered to have content |
+| `significant_threshold` | 30 | Per-pixel difference must exceed this to count as significant |
+| `mean_diff > 0.15` | — | Triggers pre-printed text handling (higher baseline) |
+| `significant_ratio > 0.20` | — | For pre-printed fields, ratio of significant pixels required |
+
+### Template Matching (`template_matcher.py`)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `ratio_threshold` | 0.7 | Lowe's ratio test for FLANN matches |
+| `ransac_threshold` | 5.0 | RANSAC reprojection error tolerance (pixels) |
+| `min_inlier_count` | 50 | Minimum RANSAC inliers to accept a template match |
+
+### VLM Inference (`vlm_loader.py`)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `model_name` | `glm-ocr` | Ollama model identifier |
+| `temperature` | 0.0 | Deterministic output |
+| `num_predict` | 256 | Maximum generated tokens |
+| `API timeout` | 120s | Per-request timeout |
+
+---
+
+## Performance
+
+Measured on RTX 4080 Laptop (12.5 GB VRAM):
+
+| Stage | Time |
+|-------|------|
+| PDF conversion | < 100 ms |
+| SIFT extraction | 100–300 ms |
+| Template matching (FLANN + RANSAC) | 200–500 ms |
+| Geometric alignment | 50–100 ms |
+| ROI extraction | < 100 ms |
+| AIP preprocessing (per ROI) | 10–30 ms |
+| VLM inference (per ROI) | 0.5–1.5 s |
+| **Total per document** | **3–5 s** |
+
+---
+
+## Design Decisions
+
+### Why Template Differencing (AIP) Before VLM?
+VLM inference is the bottleneck (~1s per ROI). AIP runs in ~20ms and can definitively determine empty fields, skipping unnecessary VLM calls. For a 14-field document, this can save 5-10 seconds when many fields are blank.
+
+### Why Ollama Instead of Direct Model Loading?
+Ollama manages model lifecycle, GPU memory, and provides a stable HTTP API. This decouples the VLM runtime from the Python application, simplifying deployment and allowing model swaps without code changes.
+
+### Why Order-Dependent Field Alignment?
+ROI images and field schemas are matched positionally via `zip()`. This avoids complex ID-based lookups and keeps the pipeline simple, but requires that `update_configs.py` always generates configs and schemas in the same order as LabelMe annotations.
+
+### Why Singleton VLM Client?
+The Ollama client is shared across all document processing to avoid repeated health checks and connection overhead. Hardware detection runs once at startup.
+
+---
+
+## Adding New Templates
+
+1. Create a template image and save to `templates/images/{template_id}.jpg`
+2. Annotate ROI regions using [LabelMe](https://github.com/wkentaro/labelme) and save to `templates/location/{template_id}.json`
+3. Add the template ID to `load_all_templates()` in `template_loader.py`
+4. Run `python update_configs.py` to generate configs, blank ROIs, and update field schemas
+5. Verify with `python main.py`
+
+---
 
 ## License
 
-[Your License Here]
+[MIT License](LICENSE)

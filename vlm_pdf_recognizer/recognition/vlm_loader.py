@@ -8,8 +8,6 @@ with automatic hardware detection and health checking.
 from dataclasses import dataclass
 from typing import Optional, Tuple, Any
 import logging
-import base64
-import json
 
 import requests
 
