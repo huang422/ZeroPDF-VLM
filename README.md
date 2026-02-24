@@ -387,22 +387,6 @@ Measured on RTX 4080 Laptop (12.5 GB VRAM):
 
 ---
 
-## Design Decisions
-
-### Why Template Differencing (AIP) Before VLM?
-VLM inference is the bottleneck (~1s per ROI). AIP runs in ~20ms and can definitively determine empty fields, skipping unnecessary VLM calls. For a 14-field document, this can save 5-10 seconds when many fields are blank.
-
-### Why Ollama Instead of Direct Model Loading?
-Ollama manages model lifecycle, GPU memory, and provides a stable HTTP API. This decouples the VLM runtime from the Python application, simplifying deployment and allowing model swaps without code changes.
-
-### Why Order-Dependent Field Alignment?
-ROI images and field schemas are matched positionally via `zip()`. This avoids complex ID-based lookups and keeps the pipeline simple, but requires that `update_configs.py` always generates configs and schemas in the same order as LabelMe annotations.
-
-### Why Singleton VLM Client?
-The Ollama client is shared across all document processing to avoid repeated health checks and connection overhead. Hardware detection runs once at startup.
-
----
-
 ## Adding New Templates
 
 1. Create a template image and save to `templates/images/{template_id}.jpg`
@@ -413,6 +397,19 @@ The Ollama client is shared across all document processing to avoid repeated hea
 
 ---
 
+## Security Note on Input/Output Data
+
+The `input/` and `output/` directories are excluded from version control (via `.gitignore`) as they contain confidential documents. However, the system is designed with strong generalizability — simply follow the setup steps above and place your own PDF documents in the `input/{date}/{case_id}/` directory structure. The pipeline works well with a wide variety of structured document types, including authorization letters, consent forms, contracts, and other similar documents.
+
+---
+
 ## License
 
-[MIT License](LICENSE)
+This project is available for educational and portfolio demonstration purposes.
+
+## Contact
+
+For questions, issues, or collaboration inquiries:
+
+- Developer: Tom Huang
+- Email: huang1473690@gmail.com

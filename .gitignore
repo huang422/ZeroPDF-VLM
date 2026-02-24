@@ -34,12 +34,12 @@ env/
 *~
 
 # Project specific
-output/
+output/*
 *.pkl
 *.pyc
 data/*/template_features.pkl
-data/
-input/
+data/*
+input/*
 templates/images/
 templates/location/
 prompt.md
