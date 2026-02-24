@@ -1,107 +1,203 @@
 """
-VLM model loader with hardware-adaptive loading strategy.
+VLM model loader using Ollama API with GPU preference and CPU fallback.
 
-This module provides singleton-based VLM loading with automatic hardware detection
-and quantization fallback for CPU environments.
+This module provides singleton-based Ollama client for glm-ocr model
+with automatic hardware detection and health checking.
 """
 
 from dataclasses import dataclass
 from typing import Optional, Tuple, Any
 import logging
+import base64
+import json
+
+import requests
 
 logger = logging.getLogger(__name__)
+
+# Ollama API defaults
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+DEFAULT_MODEL_NAME = "glm-ocr"
 
 
 @dataclass
 class VLMConfig:
-    """Configuration for VLM model loading and hardware detection.
+    """Configuration for Ollama VLM model.
 
     Attributes:
-        model_name: HuggingFace model identifier
-        device: Selected device ("cuda" or "cpu")
-        precision: Model precision ("BF16", "FP16", "INT8", "INT4", "BF16_CPU")
-        vram_gb: Available GPU VRAM in GB (if device=="cuda")
-        ram_gb: Available system RAM in GB (if device=="cpu")
-        quantization_fallback: Whether to attempt INT8→INT4→unquantized fallback on CPU OOM
-        cache_dir: HuggingFace cache directory override (None uses default ~/.cache/huggingface/)
+        model_name: Ollama model name (default: glm-ocr)
+        ollama_host: Ollama server URL (default: http://localhost:11434)
+        device: Detected device ("gpu" or "cpu")
+        vram_gb: Available GPU VRAM in GB (if GPU available)
+        num_gpu: Number of GPU layers to use (-1=auto, 0=CPU only)
+        temperature: Generation temperature (0.0 for deterministic)
+        num_predict: Max tokens to generate
     """
 
-    model_name: str = "OpenGVLab/InternVL3_5-2B"
-    device: str = ""  # Populated by detectio
-    precision: str = ""  # Populated by detection
+    model_name: str = DEFAULT_MODEL_NAME
+    ollama_host: str = DEFAULT_OLLAMA_HOST
+    device: str = ""  # Populated by detection
     vram_gb: Optional[float] = None
-    ram_gb: Optional[float] = None
-    quantization_fallback: bool = True
-    cache_dir: Optional[str] = None
+    num_gpu: int = -1  # -1 = auto (Ollama decides), 0 = CPU only
+    temperature: float = 0.0
+    num_predict: int = 256
 
     def __post_init__(self):
-        """Detect hardware and set device/precision if not already set."""
+        """Detect hardware and configure GPU/CPU preference."""
         if not self.device:
             self._detect_hardware()
 
     def _detect_hardware(self):
-        """Detect available hardware (GPU/CPU) and set device/precision."""
+        """Detect available hardware (GPU/CPU) and set device preference."""
         try:
             import torch
-            import psutil
 
             if torch.cuda.is_available():
-                self.device = "cuda"
+                self.device = "gpu"
                 self.vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-
-                # Select precision based on available VRAM (2B model requires less VRAM)
-                if self.vram_gb >= 8:
-                    self.precision = "BF16"  # Best quality for 8GB+ VRAM (2B model)
-                elif self.vram_gb >= 6:
-                    self.precision = "FP16"  # Fallback for 6-8GB VRAM
-                elif self.vram_gb >= 4:
-                    self.precision = "INT8"  # 8-bit quantization for 4-6GB VRAM
-                else:
-                    self.precision = "INT4"  # 4-bit quantization for <4GB VRAM
-
+                self.num_gpu = -1  # Let Ollama use all GPU layers
                 logger.info(f"GPU detected: {torch.cuda.get_device_name(0)} with {self.vram_gb:.2f}GB VRAM")
-                logger.info(f"Selected precision: {self.precision}")
+                logger.info("Ollama will prioritize GPU for inference")
             else:
                 self.device = "cpu"
-                self.ram_gb = psutil.virtual_memory().available / 1e9
+                self.num_gpu = 0  # Force CPU only
+                logger.info("No GPU detected, Ollama will use CPU")
 
-                # CPU defaults to INT8 quantization
-                self.precision = "INT8"
-                logger.info(f"No GPU detected, using CPU with {self.ram_gb:.2f}GB available RAM")
-                logger.info(f"Selected precision: {self.precision} (quantized)")
-
-        except ImportError as e:
-            logger.error(f"Failed to import required libraries for hardware detection: {e}")
-            # Fallback to CPU without quantization
-            self.device = "cpu"
-            self.precision = "BF16_CPU"
-            logger.warning("Falling back to CPU without quantization (may require significant RAM)")
+        except ImportError:
+            # torch not installed - try nvidia-smi as fallback
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits'],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    vram_mb = float(result.stdout.strip().split('\n')[0])
+                    self.vram_gb = vram_mb / 1024
+                    self.device = "gpu"
+                    self.num_gpu = -1
+                    logger.info(f"GPU detected via nvidia-smi: {self.vram_gb:.2f}GB VRAM")
+                else:
+                    self.device = "cpu"
+                    self.num_gpu = 0
+                    logger.info("No GPU detected (nvidia-smi failed), using CPU")
+            except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+                self.device = "cpu"
+                self.num_gpu = 0
+                logger.info("No GPU detection available, defaulting to CPU")
 
     def to_log_dict(self) -> dict:
-        """Convert to dictionary for structured logging.
-
-        Returns:
-            Dictionary containing model name, device, precision, and memory info
-        """
+        """Convert to dictionary for structured logging."""
         return {
             "model": self.model_name,
+            "ollama_host": self.ollama_host,
             "device": self.device,
-            "precision": self.precision,
             "vram_gb": self.vram_gb,
-            "ram_gb": self.ram_gb,
+            "num_gpu": self.num_gpu,
         }
 
 
-class VLMLoader:
-    """Singleton VLM loader with hardware-adaptive model loading.
+class OllamaClient:
+    """HTTP client wrapper for Ollama API."""
 
-    This class manages the loading and caching of the InternVL vision-language model
-    with automatic hardware detection and quantization fallback.
+    def __init__(self, host: str = DEFAULT_OLLAMA_HOST):
+        self.host = host.rstrip('/')
+        self.session = requests.Session()
+
+    def check_health(self) -> bool:
+        """Check if Ollama server is running."""
+        try:
+            response = self.session.get(f"{self.host}/api/tags", timeout=5)
+            return response.status_code == 200
+        except requests.ConnectionError:
+            return False
+        except Exception as e:
+            logger.warning(f"Ollama health check failed: {e}")
+            return False
+
+    def check_model_available(self, model_name: str) -> bool:
+        """Check if the specified model is available in Ollama."""
+        try:
+            response = self.session.get(f"{self.host}/api/tags", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                models = [m.get("name", "").split(":")[0] for m in data.get("models", [])]
+                return model_name in models
+            return False
+        except Exception as e:
+            logger.warning(f"Model availability check failed: {e}")
+            return False
+
+    def generate(self, model: str, prompt: str, images: list = None,
+                 temperature: float = 0.0, num_predict: int = 256,
+                 num_gpu: int = -1) -> str:
+        """Call Ollama generate API.
+
+        Args:
+            model: Model name
+            prompt: Text prompt
+            images: List of base64-encoded images
+            temperature: Generation temperature
+            num_predict: Max tokens to generate
+            num_gpu: Number of GPU layers (-1=auto, 0=CPU)
+
+        Returns:
+            Generated text response
+
+        Raises:
+            RuntimeError: If API call fails
+        """
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": num_predict,
+                "num_gpu": num_gpu,
+            }
+        }
+
+        if images:
+            payload["images"] = images
+
+        try:
+            response = self.session.post(
+                f"{self.host}/api/generate",
+                json=payload,
+                timeout=120  # 2 min timeout for inference
+            )
+
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"Ollama API error (status {response.status_code}): {response.text}"
+                )
+
+            result = response.json()
+            return result.get("response", "")
+
+        except requests.ConnectionError:
+            raise RuntimeError(
+                f"Cannot connect to Ollama server at {self.host}. "
+                f"Please ensure Ollama is running: ollama serve"
+            )
+        except requests.Timeout:
+            raise RuntimeError("Ollama inference timed out (>120s)")
+        except Exception as e:
+            if isinstance(e, RuntimeError):
+                raise
+            raise RuntimeError(f"Ollama API call failed: {e}")
+
+
+class VLMLoader:
+    """Singleton VLM loader using Ollama API for glm-ocr model.
+
+    This class manages the Ollama client connection and model availability
+    with automatic hardware detection for GPU/CPU preference.
     """
 
     _instance: Optional['VLMLoader'] = None
-    _model: Optional[Any] = None
-    _tokenizer: Optional[Any] = None
+    _client: Optional[OllamaClient] = None
     _config: Optional[VLMConfig] = None
 
     def __new__(cls):
@@ -112,290 +208,96 @@ class VLMLoader:
 
     @classmethod
     def get_instance(cls) -> 'VLMLoader':
-        """Get singleton instance of VLMLoader.
-
-        Returns:
-            Singleton VLMLoader instance
-        """
+        """Get singleton instance of VLMLoader."""
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
 
-    def load_model(self, config: Optional[VLMConfig] = None) -> Tuple[Any, Any, str, str]:
-        """Load VLM model with hardware-adaptive strategy.
+    def load_model(self, config: Optional[VLMConfig] = None) -> Tuple[OllamaClient, None, str, str]:
+        """Initialize Ollama client and verify model availability.
 
         Args:
-            config: Optional VLMConfig. If None, creates default config with auto-detection
+            config: Optional VLMConfig. If None, creates default config with auto-detection.
 
         Returns:
-            Tuple of (model, tokenizer, device, precision)
+            Tuple of (client, None, device, model_name)
+            Note: tokenizer is None (not needed for Ollama API)
 
         Raises:
-            RuntimeError: If model loading fails after all retry attempts
+            RuntimeError: If Ollama server is not reachable or model not available
         """
         if config is None:
             config = VLMConfig()
 
         self._config = config
 
-        logger.info(f"Loading VLM model: {config.model_name}")
+        logger.info(f"Initializing Ollama client for model: {config.model_name}")
         logger.info(f"Hardware config: {config.to_log_dict()}")
 
-        try:
-            from transformers import AutoModel, AutoTokenizer
-            import torch
-        except ImportError as e:
-            raise RuntimeError(f"Failed to import required libraries: {e}. Please install: pip install torch transformers")
+        # Create Ollama client
+        self._client = OllamaClient(host=config.ollama_host)
 
-        # Load model based on device and precision
-        if config.device == "cuda":
-            self._model, self._tokenizer = self._load_gpu_model(config)
+        # Check Ollama server health
+        if not self._client.check_health():
+            raise RuntimeError(
+                f"Ollama server is not running at {config.ollama_host}. "
+                f"Please start it with: ollama serve"
+            )
+
+        logger.info(f"Ollama server is running at {config.ollama_host}")
+
+        # Check model availability
+        if not self._client.check_model_available(config.model_name):
+            logger.warning(
+                f"Model '{config.model_name}' not found in Ollama. "
+                f"Attempting to pull..."
+            )
+            # Try to pull the model
+            try:
+                pull_response = self._client.session.post(
+                    f"{config.ollama_host}/api/pull",
+                    json={"name": config.model_name, "stream": False},
+                    timeout=600  # 10 min for model download
+                )
+                if pull_response.status_code != 200:
+                    raise RuntimeError(
+                        f"Failed to pull model '{config.model_name}': {pull_response.text}"
+                    )
+                logger.info(f"Model '{config.model_name}' pulled successfully")
+            except requests.Timeout:
+                raise RuntimeError(
+                    f"Model pull timed out. Please manually run: ollama pull {config.model_name}"
+                )
         else:
-            self._model, self._tokenizer = self._load_cpu_model(config)
+            logger.info(f"Model '{config.model_name}' is available")
 
-        logger.info(f"VLM model loaded successfully: {config.device} / {config.precision}")
-        return self._model, self._tokenizer, config.device, config.precision
+        # Log GPU/CPU configuration
+        if config.device == "gpu":
+            logger.info(f"GPU mode: {config.vram_gb:.2f}GB VRAM, num_gpu={config.num_gpu}")
+        else:
+            logger.info(f"CPU mode: num_gpu=0")
 
-    def _load_gpu_model(self, config: VLMConfig) -> Tuple[Any, Any]:
-        """Load model on GPU with BF16/FP16/INT8/INT4 precision.
+        return self._client, None, config.device, config.model_name
 
-        Args:
-            config: VLM configuration
-
-        Returns:
-            Tuple of (model, tokenizer)
-
-        Raises:
-            RuntimeError: If GPU loading fails
-        """
-        from transformers import AutoModel, AutoTokenizer
-        import torch
-
-        logger.info(f"Loading 2B model on GPU with {config.precision} precision...")
-
-        try:
-            # Load with quantization if INT8/INT4
-            if config.precision == "INT8":
-                logger.info("Loading with 8-bit quantization for GPU...")
-                model = AutoModel.from_pretrained(
-                    config.model_name,
-                    dtype=torch.bfloat16,
-                    load_in_8bit=True,
-                    device_map="auto",
-                    low_cpu_mem_usage=True,
-                    trust_remote_code=True,
-                    cache_dir=config.cache_dir
-                ).eval()
-            elif config.precision == "INT4":
-                logger.info("Loading with 4-bit quantization for GPU...")
-                model = AutoModel.from_pretrained(
-                    config.model_name,
-                    dtype=torch.bfloat16,
-                    load_in_4bit=True,
-                    device_map="auto",
-                    low_cpu_mem_usage=True,
-                    trust_remote_code=True,
-                    cache_dir=config.cache_dir
-                ).eval()
-            else:
-                # BF16 or FP16 (full precision)
-                if config.precision == "BF16":
-                    torch_dtype = torch.bfloat16
-                elif config.precision == "FP16":
-                    torch_dtype = torch.float16
-                else:
-                    torch_dtype = torch.bfloat16  # Default to BF16
-
-                model = AutoModel.from_pretrained(
-                    config.model_name,
-                    dtype=torch_dtype,
-                    low_cpu_mem_usage=True,
-                    trust_remote_code=True,
-                    cache_dir=config.cache_dir
-                ).eval().cuda()
-
-            # Load tokenizer
-            tokenizer = AutoTokenizer.from_pretrained(
-                config.model_name,
-                trust_remote_code=True,
-                use_fast=False,
-                cache_dir=config.cache_dir
-            )
-
-            logger.info(f"2B model loaded on GPU: {torch.cuda.get_device_name(0)}, {config.vram_gb:.2f}GB VRAM")
-            return model, tokenizer
-
-        except RuntimeError as e:
-            if "out of memory" in str(e).lower():
-                logger.warning(f"GPU OOM error with {config.precision}: {e}")
-
-                # Try fallback quantization on GPU first
-                if config.precision == "BF16":
-                    logger.warning("Retrying with FP16...")
-                    config.precision = "FP16"
-                    return self._load_gpu_model(config)
-                elif config.precision == "FP16":
-                    logger.warning("Retrying with INT8 quantization...")
-                    config.precision = "INT8"
-                    return self._load_gpu_model(config)
-                elif config.precision == "INT8":
-                    logger.warning("Retrying with INT4 quantization...")
-                    config.precision = "INT4"
-                    return self._load_gpu_model(config)
-                else:
-                    # Final fallback to CPU
-                    logger.warning("All GPU attempts failed, falling back to CPU with quantization...")
-                    config.device = "cpu"
-                    config.precision = "INT8"
-                    return self._load_cpu_model(config)
-            else:
-                raise RuntimeError(f"Failed to load model on GPU: {e}")
-
-    def _load_cpu_model(self, config: VLMConfig) -> Tuple[Any, Any]:
-        """Load model on CPU with quantization fallback (INT8 → INT4 → unquantized).
-
-        Args:
-            config: VLM configuration
+    def reload_model(self) -> Tuple[OllamaClient, None, str, str]:
+        """Force reconnect to Ollama server.
 
         Returns:
-            Tuple of (model, tokenizer)
-
-        Raises:
-            RuntimeError: If all CPU loading attempts fail
-        """
-        from transformers import AutoModel, AutoTokenizer
-        import torch
-
-        logger.info(f"Loading model on CPU with {config.precision} quantization...")
-
-        # Try INT8 first
-        if config.precision == "INT8" and config.quantization_fallback:
-            try:
-                model = AutoModel.from_pretrained(
-                    config.model_name,
-                    dtype=torch.bfloat16,
-                    load_in_8bit=True,
-                    low_cpu_mem_usage=True,
-                    trust_remote_code=True,
-                    cache_dir=config.cache_dir
-                ).eval()
-
-                tokenizer = AutoTokenizer.from_pretrained(
-                    config.model_name,
-                    trust_remote_code=True,
-                    use_fast=False,
-                    cache_dir=config.cache_dir
-                )
-
-                logger.info(f"CPU model loaded with INT8 quantization, {config.ram_gb:.2f}GB RAM available")
-                return model, tokenizer
-
-            except RuntimeError as e:
-                if "out of memory" in str(e).lower():
-                    logger.warning(f"INT8 OOM error: {e}")
-                    logger.warning("Falling back to INT4 quantization...")
-                    config.precision = "INT4"
-                else:
-                    logger.error(f"INT8 loading failed (non-OOM): {e}")
-                    raise RuntimeError(f"Failed to load INT8 model: {e}")
-
-        # Try INT4 if INT8 failed or precision is INT4
-        if config.precision == "INT4" and config.quantization_fallback:
-            try:
-                model = AutoModel.from_pretrained(
-                    config.model_name,
-                    dtype=torch.bfloat16,
-                    load_in_4bit=True,
-                    low_cpu_mem_usage=True,
-                    trust_remote_code=True,
-                    cache_dir=config.cache_dir
-                ).eval()
-
-                tokenizer = AutoTokenizer.from_pretrained(
-                    config.model_name,
-                    trust_remote_code=True,
-                    use_fast=False,
-                    cache_dir=config.cache_dir
-                )
-
-                logger.info(f"CPU model loaded with INT4 quantization, {config.ram_gb:.2f}GB RAM available")
-                return model, tokenizer
-
-            except RuntimeError as e:
-                if "out of memory" in str(e).lower():
-                    logger.warning(f"INT4 OOM error: {e}")
-                    logger.warning("Falling back to unquantized model (requires significant RAM)...")
-                    config.precision = "BF16_CPU"
-                else:
-                    logger.error(f"INT4 loading failed (non-OOM): {e}")
-                    raise RuntimeError(f"Failed to load INT4 model: {e}")
-
-        # Final fallback: unquantized on CPU
-        try:
-            model = AutoModel.from_pretrained(
-                config.model_name,
-                dtype=torch.bfloat16,
-                low_cpu_mem_usage=True,
-                trust_remote_code=True,
-                cache_dir=config.cache_dir
-            ).eval()
-
-            tokenizer = AutoTokenizer.from_pretrained(
-                config.model_name,
-                trust_remote_code=True,
-                use_fast=False,
-                cache_dir=config.cache_dir
-            )
-
-            logger.warning(f"CPU model loaded WITHOUT quantization (may be slow), {config.ram_gb:.2f}GB RAM available")
-            return model, tokenizer
-
-        except Exception as e:
-            raise RuntimeError(f"Failed to load model on CPU (all quantization levels failed): {e}")
-
-    def reload_model(self) -> Tuple[Any, Any, str, str]:
-        """Force reload model after OOM or other errors.
-
-        This method releases existing model from memory and reloads with current config.
-
-        Returns:
-            Tuple of (model, tokenizer, device, precision)
-
-        Raises:
-            RuntimeError: If no config available or reload fails
+            Tuple of (client, None, device, model_name)
         """
         if self._config is None:
-            raise RuntimeError("Cannot reload model: no config available")
+            raise RuntimeError("Cannot reload: no config available")
 
-        logger.info("Reloading VLM model after error...")
-
-        # Release existing model
-        if self._model is not None:
-            del self._model
-            self._model = None
-
-        if self._tokenizer is not None:
-            del self._tokenizer
-            self._tokenizer = None
-
-        # Clear GPU cache if using CUDA
-        if self._config.device == "cuda":
-            try:
-                import torch
-                torch.cuda.empty_cache()
-                logger.info("GPU cache cleared")
-            except Exception as e:
-                logger.warning(f"Failed to clear GPU cache: {e}")
-
-        # Reload with current config
+        logger.info("Reconnecting to Ollama server...")
         return self.load_model(self._config)
 
-    def get_model(self) -> Tuple[Any, Any, str, str]:
-        """Get loaded model, loading if necessary.
-
-        Returns:
-            Tuple of (model, tokenizer, device, precision)
-        """
-        if self._model is None or self._tokenizer is None:
+    def get_model(self) -> Tuple[OllamaClient, None, str, str]:
+        """Get Ollama client, initializing if necessary."""
+        if self._client is None:
             return self.load_model()
-        return self._model, self._tokenizer, self._config.device, self._config.precision
+        return self._client, None, self._config.device, self._config.model_name
+
+    @property
+    def config(self) -> Optional[VLMConfig]:
+        """Get current configuration."""
+        return self._config

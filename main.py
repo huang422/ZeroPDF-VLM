@@ -1,17 +1,55 @@
 #!/usr/bin/env python3
-"""Main program: Process all files in input/ directory."""
+"""Main program: Process all files in input/ directory with nested structure (date/case_id/*.pdf)."""
 
 import os
 import sys
 import argparse
 from pathlib import Path
 from datetime import datetime
+from collections import defaultdict
 from vlm_pdf_recognizer.pipeline import DocumentProcessor, ProcessingResult
-from vlm_pdf_recognizer.output import save_result, save_batch_summary, save_batch_summary_with_vlm, save_vlm_visualization
+from vlm_pdf_recognizer.output import (
+    save_result, save_batch_summary, save_batch_summary_with_vlm,
+    save_vlm_visualization
+)
 from vlm_pdf_recognizer.recognition.vlm_recognizer import DocumentRecognitionOutput
 
+
+def scan_nested_input(input_dir: str):
+    """Scan nested input directory structure: input/date/case_id/*.pdf
+
+    Args:
+        input_dir: Root input directory path
+
+    Returns:
+        List of tuples: (file_path, date_dir, case_id)
+        Sorted by date_dir, case_id, then filename
+    """
+    input_path = Path(input_dir)
+    supported_exts = {'.jpg', '.jpeg', '.png', '.pdf'}
+    file_entries = []
+
+    # Walk through nested structure: date/case_id/files
+    for date_dir in sorted(input_path.iterdir()):
+        if not date_dir.is_dir():
+            continue
+
+        for case_dir in sorted(date_dir.iterdir()):
+            if not case_dir.is_dir():
+                continue
+
+            case_id = case_dir.name
+            date_name = date_dir.name
+
+            for file_path in sorted(case_dir.iterdir()):
+                if file_path.is_file() and file_path.suffix.lower() in supported_exts:
+                    file_entries.append((file_path, date_name, case_id))
+
+    return file_entries
+
+
 def main():
-    """Process all files in input/ directory and save to output/."""
+    """Process all files in input/ directory with nested structure and save to output/."""
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description="VLM PDF Recognizer - Batch Processing")
@@ -26,7 +64,7 @@ def main():
     args.enable_vlm = not args.disable_vlm
 
     print("=" * 70)
-    print("VLM PDF Recognizer - Batch Processing")
+    print("VLM PDF Recognizer - Batch Processing (Ollama glm-ocr)")
     if args.enable_vlm:
         print("VLM Recognition: ENABLED (default)")
     else:
@@ -45,29 +83,29 @@ def main():
         print(f"   Please create it and add your documents.")
         sys.exit(1)
 
-    # Find all image and PDF files in input directory
-    input_path = Path(input_dir)
-    input_files = []
+    # Scan nested input structure: input/date/case_id/*.pdf
+    file_entries = scan_nested_input(input_dir)
 
-    for ext in ['*.jpg', '*.jpeg', '*.png', '*.pdf', '*.JPG', '*.JPEG', '*.PNG', '*.PDF']:
-        input_files.extend(input_path.glob(ext))
-
-    input_files = sorted(input_files)
-
-    if not input_files:
+    if not file_entries:
         print(f"   No files found in '{input_dir}/' directory!")
+        print(f"   Expected structure: {input_dir}/date/case_id/*.pdf")
         print(f"   Supported formats: .jpg, .jpeg, .png, .pdf")
         sys.exit(1)
+
+    # Group by case_id for display
+    cases = defaultdict(list)
+    for file_path, date_name, case_id in file_entries:
+        cases[(date_name, case_id)].append(file_path)
 
     print(f"Input directory: {input_dir}/")
     print(f"Output directory: {output_dir}/")
     print(f"Templates directory: {templates_dir}/")
     print()
-    print(f"Found {len(input_files)} file(s) to process:")
-    for f in input_files[:10]:  # Show first 10
-        print(f"   - {f.name}")
-    if len(input_files) > 10:
-        print(f"   ... and {len(input_files) - 10} more")
+    print(f"Found {len(file_entries)} file(s) in {len(cases)} case(s):")
+    for (date_name, case_id), files in list(cases.items())[:10]:
+        print(f"   - {date_name}/{case_id}/: {len(files)} file(s)")
+    if len(cases) > 10:
+        print(f"   ... and {len(cases) - 10} more cases")
     print()
 
     # Create output directory
@@ -93,26 +131,26 @@ def main():
 
     if args.enable_vlm:
         print()
-        print("Initializing VLM model...")
+        print("Initializing Ollama glm-ocr model...")
         print()
         try:
             from vlm_pdf_recognizer.recognition import VLMLoader, VLMRecognizer, TEMPLATE_SCHEMAS
 
             # Load VLM model with hardware-adaptive loading
             loader = VLMLoader.get_instance()
-            model, tokenizer, device, precision = loader.load_model()
+            client, _, device, model_name = loader.load_model()
 
-            print(f"   VLM Model loaded successfully:")
+            print(f"   Ollama VLM ready:")
+            print(f"   Model: {model_name}")
             print(f"   Device: {device}")
-            print(f"   Precision: {precision}")
             print()
 
             # Initialize recognizer
-            vlm_recognizer = VLMRecognizer(model, tokenizer, TEMPLATE_SCHEMAS)
+            vlm_recognizer = VLMRecognizer(client, None, TEMPLATE_SCHEMAS)
 
         except ImportError as e:
             print(f"   Warning: VLM dependencies not installed: {e}")
-            print(f"   Please install: pip install torch transformers Pillow timm")
+            print(f"   Please install: pip install requests opencv-python numpy")
             print(f"   Continuing without VLM recognition...")
             args.enable_vlm = False
             print()
@@ -131,8 +169,12 @@ def main():
     # Process all files
     all_results = []
 
-    for idx, input_file in enumerate(input_files, 1):
-        print(f"[{idx}/{len(input_files)}] Processing: {input_file.name}")
+    for idx, (input_file, date_name, case_id) in enumerate(file_entries, 1):
+        # Create mirrored output directory: output/date/case_id/
+        case_output_dir = os.path.join(output_dir, date_name, case_id)
+        os.makedirs(case_output_dir, exist_ok=True)
+
+        print(f"[{idx}/{len(file_entries)}] Processing: {date_name}/{case_id}/{input_file.name}")
         print("-" * 70)
 
         try:
@@ -141,7 +183,7 @@ def main():
 
             # Save each result
             for result in results:
-                save_result(result, output_dir, save_rois=False)  # Disable original ROI saving - use preprocessed ROIs instead
+                save_result(result, case_output_dir, save_rois=False)
                 all_results.append(result)
 
                 # Print summary
@@ -163,7 +205,8 @@ def main():
                                 template_id=result.matched_template_id,
                                 page_number=result.page_number,
                                 document_name=Path(result.input_path).name,
-                                blank_template_roi_cache=processor.blank_template_roi_cache
+                                blank_template_roi_cache=processor.blank_template_roi_cache,
+                                case_id=case_id
                             )
 
                             vlm_results.append(vlm_output)
@@ -174,15 +217,15 @@ def main():
                             # Save original and AIP-processed ROI images
                             try:
                                 from vlm_pdf_recognizer.output import save_preprocessed_rois
-                                save_preprocessed_rois(result, vlm_output, output_dir)
-                                print(f"   Original ROI images saved to: output/rois/")
-                                print(f"   AIP-processed ROI images saved to: output/processed_rois/")
+                                save_preprocessed_rois(result, vlm_output, case_output_dir)
+                                print(f"   Original ROI images saved to: {case_output_dir}/rois/")
+                                print(f"   AIP-processed ROI images saved to: {case_output_dir}/processed_rois/")
                             except Exception as roi_error:
                                 print(f"   Warning: ROI save failed: {roi_error}")
 
                             # Save visualization with VLM results (color-coded ROI boxes)
                             try:
-                                vis_path = save_vlm_visualization(result, vlm_output, output_dir)
+                                vis_path = save_vlm_visualization(result, vlm_output, case_output_dir)
                                 print(f"   VLM visualization updated: {Path(vis_path).name}")
                             except Exception as vis_error:
                                 print(f"   Warning: VLM visualization failed: {vis_error}")
@@ -197,7 +240,8 @@ def main():
                                 field_results=[],
                                 results=False,
                                 processing_timestamp=datetime.now(),
-                                total_processing_time_ms=0.0
+                                total_processing_time_ms=0.0,
+                                case_id=case_id
                             )
                             vlm_results.append(error_vlm_output)
 
@@ -213,7 +257,8 @@ def main():
                             field_results=[],
                             results=False,
                             processing_timestamp=datetime.now(),
-                            total_processing_time_ms=0.0
+                            total_processing_time_ms=0.0,
+                            case_id=case_id
                         )
                         vlm_results.append(error_vlm_output)
 
@@ -244,7 +289,8 @@ def main():
                     field_results=[],
                     results=False,
                     processing_timestamp=datetime.now(),
-                    total_processing_time_ms=0.0
+                    total_processing_time_ms=0.0,
+                    case_id=case_id
                 )
                 vlm_results.append(error_vlm_output)
 
@@ -256,7 +302,7 @@ def main():
     print("=" * 70)
 
     if args.enable_vlm and vlm_results:
-        # Save integrated summary with VLM recognition results
+        # Save integrated summary with VLM recognition results (including case-level aggregation)
         summary_path = save_batch_summary_with_vlm(all_results, vlm_results, output_dir)
         print(f"   VLM_results saved with recognition results: {summary_path}")
         print(f"   Total VLM records: {len(vlm_results)}")
@@ -276,8 +322,8 @@ def main():
 
     print(f"   Summary:")
     print(f"   Total documents: {len(all_results)}")
-    print(f"   ✅ Successful: {success_count}")
-    print(f"   ❌ Failed: {failed_count}")
+    print(f"   Successful: {success_count}")
+    print(f"   Failed: {failed_count}")
 
     if success_count > 0:
         avg_time = sum(r.processing_time_ms for r in all_results if r.success) / success_count
@@ -285,21 +331,21 @@ def main():
 
     print()
     print(f"   Output directory: {output_dir}/")
-    print(f"   - Aligned images: *_aligned.png")
+    print(f"   - Structure mirrors input: output/date/case_id/")
     if args.enable_vlm and vlm_results:
         print(f"   - Visualizations: *_visualization.png (with color-coded results)")
-        print(f"     • Green boxes: Content detected (field_id: True)")
-        print(f"     • Red boxes: No content (field_id: False)")
+        print(f"     Green boxes: Content detected (field_id: True)")
+        print(f"     Red boxes: No content (field_id: False)")
     else:
         print(f"   - Visualizations: *_visualization.png")
     print(f"   - ROI images: rois/*_roi_*.png")
-    print(f"   - Metadata: *_metadata.json")
+    print(f"   - Metadata: metadata/*_metadata.json")
     print(f"   - VLM results: VLM_results.json")
     if args.enable_vlm and vlm_results:
         print(f"   - VLM recognition CSV: vlm_recognition_results.csv")
     print()
 
-    # VLM recognition summary
+    # VLM recognition summary with case-level results
     if args.enable_vlm and vlm_results:
         valid_count = sum(1 for r in vlm_results if r.results)
         invalid_count = len(vlm_results) - valid_count
@@ -307,10 +353,24 @@ def main():
 
         print("VLM Recognition Summary:")
         print(f"   Total documents recognized: {len(vlm_results)}")
-        print(f"   ✅ Valid (results=True): {valid_count}")
-        print(f"   ❌ Invalid (results=False): {invalid_count}")
+        print(f"   Valid (results=True): {valid_count}")
+        print(f"   Invalid (results=False): {invalid_count}")
         print(f"   Average VLM time: {avg_vlm_time:.0f}ms per document")
         print()
+
+        # Case-level summary
+        case_results = defaultdict(list)
+        for r in vlm_results:
+            if r.case_id:
+                case_results[r.case_id].append(r.results)
+
+        if case_results:
+            print("Case-level Results:")
+            for case_id, results_list in sorted(case_results.items()):
+                case_valid = all(results_list)  # All must be True
+                status = "True" if case_valid else "False"
+                print(f"   - {case_id}: {status} ({sum(results_list)}/{len(results_list)} documents valid)")
+            print()
 
     # Template distribution
     if success_count > 0:

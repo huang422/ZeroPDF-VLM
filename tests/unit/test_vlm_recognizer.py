@@ -14,12 +14,12 @@ class TestRecognitionResult:
     """Test RecognitionResult dataclass and validation."""
 
     def test_valid_non_title_result(self):
-        """Non-title result with has_content=True should validate."""
+        """Non-title result with has_content=True (from AIP) should validate."""
         result = RecognitionResult(
             field_id="test_field",
             has_content=True,
             content_text="Test content",
-            raw_response='{"has_content": true, "content_text": "Test content"}',
+            raw_response="Test content",
             parse_success=True,
             inference_time_ms=100.0,
             retry_count=0
@@ -27,14 +27,14 @@ class TestRecognitionResult:
         result.validate()  # Should not raise
 
     def test_empty_field_result(self):
-        """Field with has_content=False must have content_text=None."""
+        """Field with has_content=False (from AIP) must have content_text=None."""
         result = RecognitionResult(
             field_id="test_field",
             has_content=False,
             content_text=None,
-            raw_response='{"has_content": false, "content_text": null}',
+            raw_response="",
             parse_success=True,
-            inference_time_ms=100.0,
+            inference_time_ms=0.0,
             retry_count=0
         )
         result.validate()  # Should not raise
@@ -45,9 +45,9 @@ class TestRecognitionResult:
             field_id="test_field",
             has_content=False,
             content_text="Invalid",
-            raw_response='{"has_content": false, "content_text": null}',
+            raw_response="",
             parse_success=True,
-            inference_time_ms=100.0,
+            inference_time_ms=0.0,
             retry_count=0
         )
         with pytest.raises(AssertionError, match="must have content_text=None"):
@@ -66,10 +66,10 @@ class TestRecognitionResult:
         )
         result.validate()  # Should not raise
 
-    def test_title_field_without_text_fails(self):
-        """Title field with null content_text should fail."""
+    def test_aip_unavailable_result(self):
+        """Field with has_content=None (AIP unavailable) should validate."""
         result = RecognitionResult(
-            field_id="contractor_1_title",
+            field_id="test_field",
             has_content=None,
             content_text=None,
             raw_response="",
@@ -77,8 +77,7 @@ class TestRecognitionResult:
             inference_time_ms=0.0,
             retry_count=0
         )
-        with pytest.raises(AssertionError, match="must have non-null content_text"):
-            result.validate()
+        result.validate()  # Should not raise
 
 
 class TestDocumentRecognitionOutput:
@@ -86,7 +85,7 @@ class TestDocumentRecognitionOutput:
 
     def test_valid_document_output(self):
         """Document output with correct field count should validate."""
-        template_schema = TEMPLATE_SCHEMAS["contractor_2"]  # 2 fields (simplest)
+        template_schema = TEMPLATE_SCHEMAS["contractor_2"]  # 3 fields (title, small1, version)
 
         results = [
             RecognitionResult(
@@ -99,14 +98,23 @@ class TestDocumentRecognitionOutput:
                 retry_count=0
             ),
             RecognitionResult(
-                field_id="small",
+                field_id="small1",
                 has_content=True,
                 content_text=None,
-                raw_response='{"has_content": true, "content_text": null}',
+                raw_response="",
                 parse_success=True,
-                inference_time_ms=150.0,
+                inference_time_ms=0.0,
                 retry_count=0
-            )
+            ),
+            RecognitionResult(
+                field_id="version",
+                has_content=True,
+                content_text="20250417",
+                raw_response="20250417",
+                parse_success=True,
+                inference_time_ms=100.0,
+                retry_count=0
+            ),
         ]
 
         doc_output = DocumentRecognitionOutput(
@@ -123,7 +131,7 @@ class TestDocumentRecognitionOutput:
 
     def test_field_count_mismatch_fails(self):
         """Document with wrong field count should fail validation."""
-        template_schema = TEMPLATE_SCHEMAS["contractor_2"]  # Expects 2 fields
+        template_schema = TEMPLATE_SCHEMAS["contractor_2"]  # Expects 3 fields
 
         results = [
             RecognitionResult(
@@ -135,7 +143,7 @@ class TestDocumentRecognitionOutput:
                 inference_time_ms=0.0,
                 retry_count=0
             )
-            # Missing second field
+            # Missing other fields
         ]
 
         doc_output = DocumentRecognitionOutput(
@@ -267,14 +275,23 @@ class TestDocumentRecognitionOutput:
                 retry_count=0
             ),
             RecognitionResult(
-                field_id="small",
+                field_id="small1",
                 has_content=True,
                 content_text=None,
-                raw_response='{"has_content": true, "content_text": null}',
+                raw_response="",
                 parse_success=True,
-                inference_time_ms=150.0,
+                inference_time_ms=0.0,
                 retry_count=0
-            )
+            ),
+            RecognitionResult(
+                field_id="version",
+                has_content=True,
+                content_text="20250417",
+                raw_response="20250417",
+                parse_success=True,
+                inference_time_ms=100.0,
+                retry_count=0
+            ),
         ]
 
         doc_output = DocumentRecognitionOutput(
@@ -293,13 +310,19 @@ class TestDocumentRecognitionOutput:
         assert json_dict["document_ID"] == "test.pdf"
         assert json_dict["type"] == "contractor_2"
         assert json_dict["title"] == "個人資料特定目的外用告知事項暨同意書"
+        assert json_dict["version"] == "20250417"
         assert json_dict["results"] is True
         assert "processing_timestamp" in json_dict
 
         # Check fields structure
         assert "fields" in json_dict
-        assert "small" in json_dict["fields"]
+        assert "small1" in json_dict["fields"]
 
-        # stamp field should only have has_content (no content_text)
-        assert json_dict["fields"]["small"]["has_content"] is True
-        assert "content_text" not in json_dict["fields"]["small"]
+        # stamp field should have has_content AND content_text, no VLM_has_content/AIP_has_content
+        assert json_dict["fields"]["small1"]["has_content"] is True
+        assert "content_text" in json_dict["fields"]["small1"]
+        assert "VLM_has_content" not in json_dict["fields"]["small1"]
+        assert "AIP_has_content" not in json_dict["fields"]["small1"]
+
+        # version field should be at top level, not in fields
+        assert "version" not in json_dict["fields"]

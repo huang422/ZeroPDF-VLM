@@ -1,11 +1,11 @@
 """
-VLM-based ROI content recognition module.
+VLM-based ROI content recognition module using Ollama glm-ocr.
 
 This module provides Vision Language Model (VLM) integration for recognizing
 content within extracted ROI regions from PDF documents.
 
 Components:
-- vlm_loader: Hardware-adaptive VLM model loading (InternVL 3.5-1B)
+- vlm_loader: Ollama API client with GPU/CPU auto-detection
 - field_schema: Template-specific field definitions and prompt templates
 - vlm_recognizer: Core recognition logic with exception handling and retry
 

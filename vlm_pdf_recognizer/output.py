@@ -1,9 +1,10 @@
-"""Output saving utilities for processing results."""
+"""Output saving utilities for processing results with nested directory support."""
 
 import cv2
 import json
 from pathlib import Path
-from typing import List
+from typing import List, Dict, Any
+from collections import defaultdict
 from vlm_pdf_recognizer.pipeline import ProcessingResult
 
 
@@ -13,14 +14,14 @@ def save_result(result: ProcessingResult, output_dir: str, save_rois: bool = Fal
 
     Args:
         result: ProcessingResult object
-        output_dir: Directory to save outputs
+        output_dir: Directory to save outputs (already includes date/case_id path)
         save_rois: Whether to save individual ROI images
 
     Output structure:
         output_dir/
-            {input_name}_page{n}_aligned.png
             {input_name}_page{n}_visualization.png
-            {input_name}_page{n}_metadata.json
+            metadata/
+                {input_name}_page{n}_metadata.json
             rois/
                 {input_name}_page{n}_roi_{roi_id}.png  (if save_rois=True)
     """
@@ -31,10 +32,6 @@ def save_result(result: ProcessingResult, output_dir: str, save_rois: bool = Fal
     input_name = Path(result.input_path).stem
     page_suffix = f"_page{result.page_number}" if result.page_number > 0 else ""
     base_name = f"{input_name}{page_suffix}"
-
-    # Save aligned image
-    # aligned_path = output_path / f"{base_name}_aligned.png"
-    # cv2.imwrite(str(aligned_path), result.aligned_image)
 
     # Save visualization image
     vis_path = output_path / f"{base_name}_visualization.png"
@@ -91,7 +88,7 @@ def save_preprocessed_rois(result: ProcessingResult, vlm_output, output_dir: str
     Args:
         result: ProcessingResult object with extracted_rois
         vlm_output: DocumentRecognitionOutput with field_results containing processed_roi_image
-        output_dir: Directory to save ROI images
+        output_dir: Directory to save ROI images (already includes date/case_id path)
 
     Output structure:
         output_dir/
@@ -137,13 +134,13 @@ def save_vlm_visualization(result: ProcessingResult, vlm_output, output_dir: str
     Args:
         result: ProcessingResult object with aligned_image and extracted_rois
         vlm_output: DocumentRecognitionOutput with VLM field_results
-        output_dir: Directory to save visualization
+        output_dir: Directory to save visualization (already includes date/case_id path)
 
-    Color coding (updated with AIP priority):
-        - Green (BGR: 0,255,0): AIP_has_content=True OR has_content=True (filled fields)
-        - Red (BGR: 0,0,255): AIP_has_content=False OR has_content=False (empty fields)
-        - Blue (BGR: 255,0,0): AIP_has_content=None (AIP error/skip)
-        - Original template color: Title fields (has_content=None)
+    Color coding:
+        - Green (BGR: 0,255,0): has_content=True (filled fields)
+        - Red (BGR: 0,0,255): has_content=False (empty fields)
+        - Blue (BGR: 255,0,0): has_content=None (AIP unavailable)
+        - Original template color: Title fields
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -167,45 +164,19 @@ def save_vlm_visualization(result: ProcessingResult, vlm_output, output_dir: str
         field_result = field_results_dict.get(roi.roi_id)
 
         if field_result is None:
-            # ROI has no matching field_result (shouldn't happen, but use original color)
             color = roi.visualization_color
             label = f"{roi.roi_id}: N/A"
         else:
-            # Color logic (updated with AIP priority - Feature 004):
-            # Priority: AIP_has_content (if available) > has_content (VLM inference)
-            # - Title fields (has_content=None): Keep original template color
-            # - Checkbox fields: Use AIP_has_content if available, fallback to VLM has_content
-            # - Other fields: Use AIP_has_content (green=True, red=False, blue=None/error)
-
-            # Check if this is a title field (has_content=None indicates title)
             if field_result.has_content is None:
-                # Title field - use original template color
+                # Title field or AIP unavailable - use original template color
                 color = roi.visualization_color
                 label = f"{roi.roi_id}: title"
+            elif field_result.has_content:
+                color = (0, 255, 0)  # GREEN - has content
+                label = f"{roi.roi_id}: True"
             else:
-                # Determine content detection result using AIP
-                if field_result.AIP_has_content is not None:
-                    # AIP result available
-                    has_content = field_result.AIP_has_content
-                    if has_content:
-                        color = (0, 255, 0)  # GREEN
-                        label = f"{roi.roi_id}: True"
-                    else:
-                        color = (0, 0, 255)  # RED
-                        label = f"{roi.roi_id}: False"
-                elif field_result.AIP_has_content is None and field_result.AIP_time_ms is not None:
-                    # AIP ran but returned None (error case)
-                    color = (255, 0, 0)  # BLUE
-                    label = f"{roi.roi_id}: ERROR"
-                else:
-                    # Fallback to VLM result (checkbox heuristic or VLM inference)
-                    has_content = field_result.has_content
-                    if has_content:
-                        color = (0, 255, 0)  # GREEN
-                        label = f"{roi.roi_id}: True"
-                    else:
-                        color = (0, 0, 255)  # RED
-                        label = f"{roi.roi_id}: False"
+                color = (0, 0, 255)  # RED - no content
+                label = f"{roi.roi_id}: False"
 
         # Draw rectangle with thickness 2-3 for visibility
         cv2.rectangle(vis_image, (x1, y1), (x2, y2), color, 2)
@@ -226,6 +197,37 @@ def save_vlm_visualization(result: ProcessingResult, vlm_output, output_dir: str
     cv2.imwrite(str(vis_path), vis_image)
 
     return str(vis_path)
+
+
+def _aggregate_case_results(vlm_results: List) -> Dict[str, Dict[str, Any]]:
+    """Aggregate document results by case_id.
+
+    If any document in the same case_id folder has results=False,
+    the entire case is marked as False.
+
+    Args:
+        vlm_results: List of DocumentRecognitionOutput objects
+
+    Returns:
+        Dictionary mapping case_id to {case_results: bool, documents: list}
+    """
+    case_groups = defaultdict(list)
+    for vlm_result in vlm_results:
+        case_id = getattr(vlm_result, 'case_id', None) or "unknown"
+        case_groups[case_id].append(vlm_result)
+
+    case_aggregated = {}
+    for case_id, results in case_groups.items():
+        # Case is False if ANY document in the case is False
+        case_valid = all(r.results for r in results)
+        case_aggregated[case_id] = {
+            "case_results": case_valid,
+            "document_count": len(results),
+            "valid_count": sum(1 for r in results if r.results),
+            "invalid_count": sum(1 for r in results if not r.results),
+        }
+
+    return case_aggregated
 
 
 def save_batch_summary(results: List[ProcessingResult], output_dir: str):
@@ -310,7 +312,8 @@ def save_vlm_recognition_results(vlm_results: List, output_dir: str, filename: s
 
 def save_batch_summary_with_vlm(results: List[ProcessingResult], vlm_results: List, output_dir: str):
     """
-    Save batch processing summary with integrated VLM recognition results.
+    Save batch processing summary with integrated VLM recognition results
+    and case-level aggregation.
 
     Args:
         results: List of ProcessingResult objects from preprocessing pipeline
@@ -319,7 +322,7 @@ def save_batch_summary_with_vlm(results: List[ProcessingResult], vlm_results: Li
 
     Note:
         This combines preprocessing pipeline results with VLM recognition results
-        into a single VLM_results.json file.
+        into a single VLM_results.json file, including case-level aggregation.
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -342,8 +345,19 @@ def save_batch_summary_with_vlm(results: List[ProcessingResult], vlm_results: Li
     vlm_failure_count = vlm_count - vlm_success_count
     vlm_avg_time = sum(v.total_processing_time_ms for v in vlm_results) / vlm_count if vlm_count > 0 else 0
 
-    # Convert VLM results to dictionaries
-    vlm_data = [v.to_json_dict() for v in vlm_results] if vlm_results else []
+    # Case-level aggregation
+    case_aggregated = _aggregate_case_results(vlm_results) if vlm_results else {}
+
+    # Convert VLM results to dictionaries and add case_results
+    vlm_data = []
+    if vlm_results:
+        for v in vlm_results:
+            doc_dict = v.to_json_dict()
+            # Add case_results from aggregation
+            case_id = getattr(v, 'case_id', None) or "unknown"
+            if case_id in case_aggregated:
+                doc_dict["case_results"] = case_aggregated[case_id]["case_results"]
+            vlm_data.append(doc_dict)
 
     # Build integrated summary
     summary = {
@@ -360,6 +374,10 @@ def save_batch_summary_with_vlm(results: List[ProcessingResult], vlm_results: Li
             "failed": vlm_failure_count,
             "average_processing_time_ms": round(vlm_avg_time, 2)
         },
+        "case_results": {
+            case_id: info
+            for case_id, info in sorted(case_aggregated.items())
+        },
         "documents": vlm_data
     }
 
@@ -368,10 +386,10 @@ def save_batch_summary_with_vlm(results: List[ProcessingResult], vlm_results: Li
     with open(summary_path, 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
-    # Export to CSV with AIP columns
+    # Export to CSV with AIP columns and case-level results
     try:
         from vlm_pdf_recognizer.recognition.csv_exporter import export_recognition_results_to_csv
-        csv_path = export_recognition_results_to_csv(vlm_results, output_dir)
+        csv_path = export_recognition_results_to_csv(vlm_results, output_dir, case_aggregated=case_aggregated)
     except Exception as csv_error:
         # CSV export is optional - continue if it fails
         print(f"   Warning: CSV export failed: {csv_error}")
