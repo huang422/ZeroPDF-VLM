@@ -1,5 +1,12 @@
 # VLM PDF Recognizer
 
+[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
+[![OpenCV](https://img.shields.io/badge/OpenCV-4.8+-red.svg)](https://opencv.org/)
+[![Ollama](https://img.shields.io/badge/Ollama-Latest-000000.svg)](https://ollama.com/)
+[![glm--ocr](https://img.shields.io/badge/glm--ocr-VLM--OCR-FF6F61.svg)](https://ollama.com/library/glm-ocr)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/huang422)
+
 A local, privacy-first document processing system that combines computer vision alignment with Vision Language Model (VLM) inference for zero-shot content recognition on Traditional Chinese scanned documents.
 
 > **No cloud services. No training data. No fine-tuning.**
@@ -405,7 +412,9 @@ The `input/` and `output/` directories are excluded from version control (via `.
 
 ## License
 
-This project is available for educational and portfolio demonstration purposes.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
 
 ## Contact
 
