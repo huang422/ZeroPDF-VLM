@@ -5,7 +5,7 @@
 [![Ollama](https://img.shields.io/badge/Ollama-Latest-000000.svg)](https://ollama.com/)
 [![glm--ocr](https://img.shields.io/badge/glm--ocr-VLM--OCR-FF6F61.svg)](https://ollama.com/library/glm-ocr)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/huang422)
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Donate-orange.svg?logo=buymeacoffee&logoColor=white)](https://www.buymeacoffee.com/huang422)
 
 A local, privacy-first document processing system that combines computer vision alignment with Vision Language Model (VLM) inference for zero-shot content recognition on Traditional Chinese scanned documents.
 
@@ -117,13 +117,14 @@ Scanned PDF / Image
 ### Batch Processing with Nested Directory Support
 - Input structure: `input/{date}/{case_id}/*.pdf`
 - Output mirrors input: `output/{date}/{case_id}/`
-- Case-level aggregation: a case passes only if all its documents pass
+- Case-level aggregation: a case passes only if all its documents pass and all three template types (`contractor_1`, `contractor_2`, `enterprise_1`) are present
 - CSV export for downstream analysis
 
 ### Document Validation Logic
 - **VX1 priority rule**: if disagreement checkbox is checked → document fails
 - **Date fields (OR logic)**: at least one of year/month/date must have content
 - **Required fields (AND logic)**: all non-date, non-checkbox, non-version fields must have content
+- **Case-level completeness**: case result is True only when all documents pass and all three required template types (`contractor_1`, `contractor_2`, `enterprise_1`) are present in the case
 
 ---
 
@@ -248,8 +249,11 @@ output/
   "case_results": {
     "case_a101": {
       "case_results": true,
-      "document_count": 2,
-      "valid_count": 2
+      "document_count": 3,
+      "valid_count": 3,
+      "invalid_count": 0,
+      "template_types_present": ["contractor_1", "contractor_2", "enterprise_1"],
+      "missing_template_types": []
     }
   },
   "documents": [
@@ -412,9 +416,7 @@ The `input/` and `output/` directories are excluded from version control (via `.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
+This project is available for educational and portfolio demonstration purposes.
 
 ## Contact
 

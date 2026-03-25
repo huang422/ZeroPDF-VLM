@@ -388,18 +388,26 @@ def main():
         print(f"   Average VLM time: {avg_vlm_time:.0f}ms per document")
         print()
 
-        # Case-level summary
-        case_results = defaultdict(list)
+        # Case-level summary (requires all results=True AND all 3 template types present)
+        from vlm_pdf_recognizer.output import REQUIRED_TEMPLATE_TYPES
+        case_groups = defaultdict(list)
         for r in vlm_results:
             if r.case_id:
-                case_results[r.case_id].append(r.results)
+                case_groups[r.case_id].append(r)
 
-        if case_results:
+        if case_groups:
             print("Case-level Results:")
-            for case_id, results_list in sorted(case_results.items()):
-                case_valid = all(results_list)  # All must be True
+            for case_id, case_docs in sorted(case_groups.items()):
+                all_valid = all(r.results for r in case_docs)
+                present_types = {r.template_id for r in case_docs}
+                missing_types = REQUIRED_TEMPLATE_TYPES - present_types
+                case_valid = all_valid and len(missing_types) == 0
                 status = "True" if case_valid else "False"
-                print(f"   - {case_id}: {status} ({sum(results_list)}/{len(results_list)} documents valid)")
+                valid_count = sum(1 for r in case_docs if r.results)
+                info = f"{valid_count}/{len(case_docs)} documents valid, types: {sorted(present_types)}"
+                if missing_types:
+                    info += f", missing: {sorted(missing_types)}"
+                print(f"   - {case_id}: {status} ({info})")
             print()
 
     # Template distribution

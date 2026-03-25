@@ -199,17 +199,22 @@ def save_vlm_visualization(result: ProcessingResult, vlm_output, output_dir: str
     return str(vis_path)
 
 
+REQUIRED_TEMPLATE_TYPES = {"contractor_1", "contractor_2", "enterprise_1"}
+
+
 def _aggregate_case_results(vlm_results: List) -> Dict[str, Dict[str, Any]]:
     """Aggregate document results by case_id.
 
-    If any document in the same case_id folder has results=False,
-    the entire case is marked as False.
+    Case result is True only when BOTH conditions are met:
+    1. All documents in the case have results=True
+    2. All required template types (contractor_1, contractor_2, enterprise_1)
+       are present in the case
 
     Args:
         vlm_results: List of DocumentRecognitionOutput objects
 
     Returns:
-        Dictionary mapping case_id to {case_results: bool, documents: list}
+        Dictionary mapping case_id to {case_results: bool, documents: list, ...}
     """
     case_groups = defaultdict(list)
     for vlm_result in vlm_results:
@@ -218,13 +223,21 @@ def _aggregate_case_results(vlm_results: List) -> Dict[str, Dict[str, Any]]:
 
     case_aggregated = {}
     for case_id, results in case_groups.items():
-        # Case is False if ANY document in the case is False
-        case_valid = all(r.results for r in results)
+        # Condition 1: All documents must have results=True
+        all_valid = all(r.results for r in results)
+        # Condition 2: All required template types must be present
+        present_types = {r.template_id for r in results}
+        missing_types = REQUIRED_TEMPLATE_TYPES - present_types
+        all_types_present = len(missing_types) == 0
+        # Both conditions must be met
+        case_valid = all_valid and all_types_present
         case_aggregated[case_id] = {
             "case_results": case_valid,
             "document_count": len(results),
             "valid_count": sum(1 for r in results if r.results),
             "invalid_count": sum(1 for r in results if not r.results),
+            "template_types_present": sorted(present_types),
+            "missing_template_types": sorted(missing_types),
         }
 
     return case_aggregated

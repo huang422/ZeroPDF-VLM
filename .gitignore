@@ -48,6 +48,8 @@ templates/location/
 !templates/.gitkeep
 prompt.md
 CLAUDE.md
+.claude/
+.specify/
 tests/
 
 # Logs
