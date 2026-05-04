@@ -150,9 +150,28 @@ output/
 
 | 顏色 | 含義 |
 |------|------|
-| 綠色框 | 偵測到內容 |
-| 紅色框 | 未偵測到內容 |
-| 藍色框 | 無法判斷 |
+| 綠色框 | `has_content=True`（偵測到內容） |
+| 紅色框 | `has_content=False`（未偵測到內容） |
+| 原模板顏色 | 標題欄位（`has_content=None`）或無對應 VLM 結果（標籤顯示 `title` 或 `N/A`） |
+
+#### 文件 `results` 判別邏輯
+
+`VLM_results.json` 中每份文件的 `results` 由 `calculate_results_status()` 計算，規則如下：
+
+1. **VX1 優先（不同意框）**：若 `VX1.has_content == True`（有勾選），直接 `results=False`，後續其他欄位不再檢查。
+2. **日期 OR 邏輯**：`year` / `month` / `date` 至少一個 `has_content == True` 即視為通過。
+3. **其餘欄位 AND 邏輯**：除了 `title`（`has_content=None`）、`version`、VX1（已於上面處理）、以及 year/month/date 之外，**其餘所有欄位都必須 `has_content == True`** —— 包含 VX2（同意勾選框）必須打勾、所有姓名/公司/編號/印章欄位必須有內容。任一為 False 則 `results=False`。
+4. 最終結果：`date_valid AND other_fields_valid`。
+
+#### Case 級別 `case_results`
+
+當且僅當下列三個條件**同時滿足**時，`case_results=True`，否則為 False：
+
+1. 該 case 內所有文件的 `results` 皆為 True（無 VLM 判別失敗、無空白文件）。
+2. 該 case 內所有文件都成功匹配到必要 template 類型（無 pipeline 失敗、無非目標文件；`template_id` 為 `error` / `unknown` 或其他模板者一律算失敗）。
+3. 該 case 同時包含三種必要 template：`contractor_1`、`contractor_2`、`enterprise_1`（無遺漏目標文件）。
+
+`VLM_results.json` 的 `case_results.<case_id>` 區塊會額外列出 `non_target_documents`、`missing_template_types` 以協助診斷。
 
 ---
 

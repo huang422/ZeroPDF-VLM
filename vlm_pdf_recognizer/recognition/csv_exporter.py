@@ -55,9 +55,11 @@ def export_recognition_results_to_csv(
             ])
         return str(csv_path)
 
-    # Build case_aggregated if not provided
+    # Build case_aggregated if not provided (mirror logic in output._aggregate_case_results)
     if case_aggregated is None:
         from collections import defaultdict
+        from vlm_pdf_recognizer.output import REQUIRED_TEMPLATE_TYPES
+
         case_groups = defaultdict(list)
         for vlm_result in vlm_results:
             case_id = getattr(vlm_result, 'case_id', None) or "unknown"
@@ -65,7 +67,11 @@ def export_recognition_results_to_csv(
 
         case_aggregated = {}
         for case_id, results in case_groups.items():
-            case_valid = all(r.results for r in results)
+            all_valid = all(r.results for r in results)
+            all_targets = all(r.template_id in REQUIRED_TEMPLATE_TYPES for r in results)
+            present_types = {r.template_id for r in results if r.template_id in REQUIRED_TEMPLATE_TYPES}
+            all_types_present = (REQUIRED_TEMPLATE_TYPES - present_types) == set()
+            case_valid = all_valid and all_targets and all_types_present
             case_aggregated[case_id] = {"case_results": case_valid}
 
     # Single pass: collect all unique field IDs, field types, and fields with text content

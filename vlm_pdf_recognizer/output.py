@@ -139,8 +139,8 @@ def save_vlm_visualization(result: ProcessingResult, vlm_output, output_dir: str
     Color coding:
         - Green (BGR: 0,255,0): has_content=True (filled fields)
         - Red (BGR: 0,0,255): has_content=False (empty fields)
-        - Blue (BGR: 255,0,0): has_content=None (AIP unavailable)
-        - Original template color: Title fields
+        - Original template color: Title fields (has_content=None) or fields with no
+          matching VLM result (label "title" or "N/A")
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -205,16 +205,25 @@ REQUIRED_TEMPLATE_TYPES = {"contractor_1", "contractor_2", "enterprise_1"}
 def _aggregate_case_results(vlm_results: List) -> Dict[str, Dict[str, Any]]:
     """Aggregate document results by case_id.
 
-    Case result is True only when BOTH conditions are met:
-    1. All documents in the case have results=True
-    2. All required template types (contractor_1, contractor_2, enterprise_1)
-       are present in the case
+    Case result is True only when ALL of the following conditions are met:
+    1. All documents in the case have results=True (no failed/blank documents)
+    2. All documents in the case match a required template type (no non-target /
+       unmatched / error documents)
+    3. All required template types (contractor_1, contractor_2, enterprise_1)
+       are present in the case (no missing target documents)
+
+    Any failed document (results=False), blank document, or non-target document
+    (template_id not in REQUIRED_TEMPLATE_TYPES, e.g. "error"/"unknown") in the
+    case will cause case_results to be False.
 
     Args:
         vlm_results: List of DocumentRecognitionOutput objects
 
     Returns:
-        Dictionary mapping case_id to {case_results: bool, documents: list, ...}
+        Dictionary mapping case_id to aggregated info including:
+            case_results, document_count, valid_count, invalid_count,
+            template_types_present, missing_template_types,
+            non_target_documents (documents with template_id outside the required set)
     """
     case_groups = defaultdict(list)
     for vlm_result in vlm_results:
@@ -225,12 +234,27 @@ def _aggregate_case_results(vlm_results: List) -> Dict[str, Dict[str, Any]]:
     for case_id, results in case_groups.items():
         # Condition 1: All documents must have results=True
         all_valid = all(r.results for r in results)
-        # Condition 2: All required template types must be present
-        present_types = {r.template_id for r in results}
+
+        # Condition 2: All documents must match a required template type
+        # (catches failed-pipeline docs with template_id="error"/"unknown" and
+        #  any unrelated documents accidentally placed in the case folder)
+        non_target_docs = [
+            r.document_name for r in results
+            if r.template_id not in REQUIRED_TEMPLATE_TYPES
+        ]
+        all_targets = len(non_target_docs) == 0
+
+        # Condition 3: All required template types must be present
+        present_types = {
+            r.template_id for r in results
+            if r.template_id in REQUIRED_TEMPLATE_TYPES
+        }
         missing_types = REQUIRED_TEMPLATE_TYPES - present_types
         all_types_present = len(missing_types) == 0
-        # Both conditions must be met
-        case_valid = all_valid and all_types_present
+
+        # All three conditions must be met
+        case_valid = all_valid and all_targets and all_types_present
+
         case_aggregated[case_id] = {
             "case_results": case_valid,
             "document_count": len(results),
@@ -238,6 +262,7 @@ def _aggregate_case_results(vlm_results: List) -> Dict[str, Dict[str, Any]]:
             "invalid_count": sum(1 for r in results if not r.results),
             "template_types_present": sorted(present_types),
             "missing_template_types": sorted(missing_types),
+            "non_target_documents": sorted(non_target_docs),
         }
 
     return case_aggregated
@@ -377,4 +402,112 @@ def save_batch_summary_with_vlm(results: List[ProcessingResult], vlm_results: Li
         # CSV export is optional - continue if it fails
         print(f"   Warning: CSV export failed: {csv_error}")
 
+    # Write a concise failure log listing only failed documents/cases with reasons
+    try:
+        save_failure_log(vlm_results, case_aggregated, output_dir)
+    except Exception as log_error:
+        print(f"   Warning: failure log write failed: {log_error}")
+
     return str(summary_path)
+
+
+def _diagnose_document_failure(vlm_result) -> str:
+    """Return a short reason string for why a document's results==False."""
+    # Non-target / pipeline failure
+    if vlm_result.template_id not in REQUIRED_TEMPLATE_TYPES:
+        return f"非目標文件或 pipeline 失敗 (template_id='{vlm_result.template_id}')"
+
+    # No field results means the VLM stage never produced anything
+    if not vlm_result.field_results:
+        return "VLM 辨識失敗或前處理錯誤 (無 field_results)"
+
+    # VX1 priority
+    vx1 = next((r for r in vlm_result.field_results if r.field_id == "VX1"), None)
+    if vx1 and vx1.has_content:
+        return "VX1 (不同意框) 已勾選"
+
+    # Date OR
+    date_fields = [r for r in vlm_result.field_results if r.field_id in ("year", "month", "date")]
+    if date_fields and not any(r.has_content for r in date_fields):
+        return "year/month/date 三者皆無內容"
+
+    # Other AND - list missing field IDs
+    excluded = {"VX1", "year", "month", "date"}
+    from vlm_pdf_recognizer.recognition.field_schema import TEMPLATE_SCHEMAS
+    schema = TEMPLATE_SCHEMAS.get(vlm_result.template_id)
+    missing = []
+    for r in vlm_result.field_results:
+        if r.has_content is None:
+            continue
+        if r.field_id in excluded:
+            continue
+        if schema:
+            fs = schema.get_field_by_id(r.field_id)
+            if fs and fs.field_type == "version":
+                continue
+        if not r.has_content:
+            missing.append(r.field_id)
+    if missing:
+        return f"以下欄位無內容: {missing}"
+
+    return "未知原因 (請檢查 VLM_results.json 詳細欄位)"
+
+
+def save_failure_log(vlm_results: List, case_aggregated: Dict[str, Dict[str, Any]], output_dir: str):
+    """Write a concise markdown log listing failed documents and cases with reasons.
+
+    Args:
+        vlm_results: List of DocumentRecognitionOutput objects
+        case_aggregated: Output from _aggregate_case_results
+        output_dir: Directory to save result_log.md (per date)
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    log_path = output_path / "result_log.md"
+
+    failed_docs = [v for v in (vlm_results or []) if not v.results]
+    failed_cases = {cid: info for cid, info in (case_aggregated or {}).items()
+                    if not info.get("case_results", False)}
+
+    lines = ["# 判斷失敗摘要 (result_log.md)", ""]
+
+    if not failed_docs and not failed_cases:
+        lines.append("✅ 本批次無任何失敗文件或失敗 case。")
+        log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return str(log_path)
+
+    # Failed documents
+    lines.append(f"## 失敗文件 ({len(failed_docs)} 筆)")
+    lines.append("")
+    if failed_docs:
+        lines.append("| case_id | document | template_id | 失敗原因 |")
+        lines.append("|---|---|---|---|")
+        for v in failed_docs:
+            cid = getattr(v, 'case_id', None) or "unknown"
+            doc_name = v.document_name + (f"_page{v.page_number}" if v.page_number > 0 else "")
+            reason = _diagnose_document_failure(v)
+            lines.append(f"| {cid} | {doc_name} | {v.template_id} | {reason} |")
+    else:
+        lines.append("（無）")
+    lines.append("")
+
+    # Failed cases
+    lines.append(f"## 失敗 Case ({len(failed_cases)} 個)")
+    lines.append("")
+    if failed_cases:
+        for cid, info in sorted(failed_cases.items()):
+            reasons = []
+            if info.get("invalid_count", 0) > 0:
+                reasons.append(f"{info['invalid_count']}/{info['document_count']} 文件 results=False")
+            if info.get("non_target_documents"):
+                reasons.append(f"非目標/失敗文件: {info['non_target_documents']}")
+            if info.get("missing_template_types"):
+                reasons.append(f"缺少必要模板: {info['missing_template_types']}")
+            reason = "；".join(reasons) if reasons else "未知原因"
+            lines.append(f"- **{cid}**：{reason}")
+    else:
+        lines.append("（無）")
+    lines.append("")
+
+    log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(log_path)

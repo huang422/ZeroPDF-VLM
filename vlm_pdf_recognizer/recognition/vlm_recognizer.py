@@ -120,7 +120,8 @@ class DocumentRecognitionOutput:
         Logic:
         1. VX1 priority: If VX1.has_content==True (disagreement checkbox checked), return False
         2. Date fields OR: At least one of (year, month, date) has content
-        3. Other fields AND: All non-date, non-title, non-version fields have content
+        3. Other fields AND: All non-date, non-title, non-version fields (including VX2)
+           must have content. VX2 (agreement checkbox) must be checked to pass.
         4. Final: date_valid AND other_fields_valid
 
         Returns:
@@ -138,24 +139,25 @@ class DocumentRecognitionOutput:
             date_valid = any(r.has_content for r in date_fields)
 
         # Other fields AND: all must have content
-        # Exclude: title (has_content=None), checkboxes (special logic via VX1),
+        # Exclude: title (has_content=None), VX1 (handled above as priority),
         #          date fields (OR logic above), version (always True)
+        # NOTE: VX2 (agreement checkbox) IS included - it must be checked (has_content=True) to pass.
         from .field_schema import TEMPLATE_SCHEMAS
         template_schema = TEMPLATE_SCHEMAS.get(self.template_id)
 
-        excluded_ids = {"VX1", "VX2", "year", "month", "date"}
+        excluded_ids = {"VX1", "year", "month", "date"}
         other_fields = [
             r for r in self.field_results
             if r.has_content is not None  # Exclude title fields
             and r.field_id not in excluded_ids
         ]
 
-        # Exclude version and checkbox fields from validation
+        # Exclude version fields from validation (always True). VX2 stays included.
         if template_schema:
             other_fields = [
                 r for r in other_fields
                 if not (template_schema.get_field_by_id(r.field_id) and
-                        template_schema.get_field_by_id(r.field_id).field_type in ("version", "checkbox"))
+                        template_schema.get_field_by_id(r.field_id).field_type == "version")
             ]
 
         other_fields_valid = all(r.has_content for r in other_fields)

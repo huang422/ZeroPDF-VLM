@@ -2,8 +2,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
 [![OpenCV](https://img.shields.io/badge/OpenCV-4.8+-red.svg)](https://opencv.org/)
-[![Ollama](https://img.shields.io/badge/Ollama-Latest-000000.svg)](https://ollama.com/)
-[![glm--ocr](https://img.shields.io/badge/glm--ocr-VLM--OCR-FF6F61.svg)](https://ollama.com/library/glm-ocr)
+[![Ollama glm-ocr](https://img.shields.io/badge/Ollama-glm--ocr-FF6F61.svg)](https://ollama.com/library/glm-ocr)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Donate-orange.svg?logo=buymeacoffee&logoColor=white)](https://www.buymeacoffee.com/huang422)
 
@@ -121,10 +120,10 @@ Scanned PDF / Image
 - CSV export for downstream analysis
 
 ### Document Validation Logic
-- **VX1 priority rule**: if disagreement checkbox is checked → document fails
-- **Date fields (OR logic)**: at least one of year/month/date must have content
-- **Required fields (AND logic)**: all non-date, non-checkbox, non-version fields must have content
-- **Case-level completeness**: case result is True only when all documents pass and all three required template types (`contractor_1`, `contractor_2`, `enterprise_1`) are present in the case
+- **VX1 priority rule**: if disagreement checkbox VX1 is checked → document fails immediately (`results=False`)
+- **Date fields (OR logic)**: at least one of `year` / `month` / `date` must have content
+- **Required fields (AND logic)**: all remaining non-title, non-version fields must have content. This includes VX2 (the agreement checkbox), which must be checked.
+- **Case-level completeness**: case result is True only when (1) all documents pass (`results=True`), (2) every document matches one of the three required template types — i.e. no failed/blank/non-target documents — and (3) all three required template types (`contractor_1`, `contractor_2`, `enterprise_1`) are present in the case
 
 ---
 
@@ -416,7 +415,7 @@ The `input/` and `output/` directories are excluded from version control (via `.
 
 ## License
 
-This project is available for educational and portfolio demonstration purposes.
+This project is licensed under the MIT License - see the LICENSE file for details.
 
 ## Contact
 

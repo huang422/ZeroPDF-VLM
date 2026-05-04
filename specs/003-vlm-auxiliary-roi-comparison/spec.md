@@ -9,7 +9,7 @@
 3. update_configs.py除了現有功能是產生template的向量提供對齊之外,還要根據template/提供的座標檔進行才切出ROI後產個中template的ROI相量儲存於data(空白樣本roi向量)。
 4. 在辨識新樣本要將ROI放入VLM辨識時,先把新樣本的ROi跟空白樣本的ROi做比對(類似第一階段樣本對齊辨識template方法),諾新樣本ROI跟空白樣本ROI有很高的相似度,則代表該樣本沒有填寫蓋章或簽名。如果有差異代表可能有填寫蓋章或簽名,再送入VLM辨識。
 5. 輸出維持現有的VLM辨識所有ROi的輸出,新增一欄輔助辨識的比對結果。
-6. 輸出邏輯維持現有一樣,只是將result的判斷改為輔助辨識的比對結果優先,因為result目前只看有無不看內容,邏輯要跟現在一樣(現有邏輯是:VX1 True則result直接True,其餘所有內容應該都要是True,如果有False則result是False(除了year, month, date三個用or判斷如目前的邏輯,請先確認目前邏輯))
+6. 輸出邏輯維持現有一樣,只是將result的判斷改為輔助辨識的比對結果優先,因為result目前只看有無不看內容,邏輯要跟現在一樣(現有邏輯是:VX1 True則result直接False,其餘所有欄位(含 VX2)都要是True,如果有False則result是False(除了year, month, date三個用or判斷如目前的邏輯,請先確認目前邏輯))
 7. 視覺化的輸出結果也是改成用輔助辨識的結果True or False呈現紅色和綠色
 8. VX1, VX2辨識checkbox維持現有方式"
 

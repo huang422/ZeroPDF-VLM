@@ -364,8 +364,8 @@ def main():
     print(f"   - Structure mirrors input: output/date/case_id/")
     if args.enable_vlm and vlm_results:
         print(f"   - Visualizations: *_visualization.png (with color-coded results)")
-        print(f"     Green boxes: Content detected (field_id: True)")
-        print(f"     Red boxes: No content (field_id: False)")
+        print(f"     Green boxes: has_content=True (filled)")
+        print(f"     Red boxes:   has_content=False (empty)")
     else:
         print(f"   - Visualizations: *_visualization.png")
     print(f"   - ROI images: rois/*_roi_*.png")
@@ -399,14 +399,20 @@ def main():
             print("Case-level Results:")
             for case_id, case_docs in sorted(case_groups.items()):
                 all_valid = all(r.results for r in case_docs)
-                present_types = {r.template_id for r in case_docs}
+                non_target_docs = [r.document_name for r in case_docs
+                                   if r.template_id not in REQUIRED_TEMPLATE_TYPES]
+                all_targets = len(non_target_docs) == 0
+                present_types = {r.template_id for r in case_docs
+                                 if r.template_id in REQUIRED_TEMPLATE_TYPES}
                 missing_types = REQUIRED_TEMPLATE_TYPES - present_types
-                case_valid = all_valid and len(missing_types) == 0
+                case_valid = all_valid and all_targets and len(missing_types) == 0
                 status = "True" if case_valid else "False"
                 valid_count = sum(1 for r in case_docs if r.results)
                 info = f"{valid_count}/{len(case_docs)} documents valid, types: {sorted(present_types)}"
                 if missing_types:
                     info += f", missing: {sorted(missing_types)}"
+                if non_target_docs:
+                    info += f", non-target: {sorted(non_target_docs)}"
                 print(f"   - {case_id}: {status} ({info})")
             print()
 
