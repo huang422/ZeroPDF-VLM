@@ -2,6 +2,16 @@
 
 **Input**: Design documents from `/specs/002-vlm-roi-recognition/`
 **Prerequisites**: plan.md, spec.md, research.md, data-model.md
+**Last Aligned With Code**: 2026-05-26
+**Status**: ✅ ALL TASKS COMPLETED. Production code lives in `vlm_pdf_recognizer/recognition/` and `vlm_pdf_recognizer/output.py`.
+
+> **Note for current contributors**: do not append new tasks here. New work follows the workflow in [DEVELOPMENT_WORKFLOW.md](../../DEVELOPMENT_WORKFLOW.md) — open an issue / PR rather than extending this historical list.
+>
+> **Major drift from this task list**:
+> - All tasks referencing `InternVL` / `transformers` / `pytorch` / `quantization` / `pixel_values` were **superseded by the Ollama pivot**. Production has no InternVL code paths. See [research.md](./research.md) Section 0 for the pivot rationale.
+> - Tasks describing **JSON parsing of VLM output** are obsolete. Production uses raw OCR text + post-processing (`_clean_content_text` in `vlm_recognizer.py`).
+> - **Case-level validation** (three-template completeness) was added after this task list was written. See `output._aggregate_case_results`.
+> - **VX2 enforcement** (must be checked) was added after this task list was written. See `calculate_results_status`.
 
 **Tests**: No test tasks included - tests not explicitly requested in specification. Focus on implementation and integration.
 

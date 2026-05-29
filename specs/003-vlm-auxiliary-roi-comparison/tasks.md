@@ -2,6 +2,15 @@
 
 **Input**: Design documents from `/specs/003-vlm-auxiliary-roi-comparison/`
 **Prerequisites**: plan.md, spec.md, research.md, data-model.md, contracts/, quickstart.md
+**Last Aligned With Code**: 2026-05-26
+**Status**: ⚠️ **SUPERSEDED — NONE OF THESE TASKS WERE IMPLEMENTED AS-IS.**
+
+> Tasks below were superseded by [`specs/004-vlm-roi-preprocessing/tasks.md`](../004-vlm-roi-preprocessing/tasks.md). Do not work from this list.
+>
+> If you arrived here looking for AIP implementation status, the production code is:
+> - `vlm_pdf_recognizer/recognition/roi_preprocessor.py` (AIP pipeline)
+> - `vlm_pdf_recognizer/alignment/blank_template_roi_cache.py` (blank-image cache)
+> - `update_configs.py` (extracts blank ROI PNGs into `data/<id>/blank_rois/`)
 
 **Tests**: Tests are included in this plan following existing project pytest infrastructure.
 

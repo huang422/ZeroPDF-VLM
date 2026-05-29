@@ -2,182 +2,177 @@
 
 **Feature Branch**: `001-document-template-alignment`
 **Created**: 2025-12-23
-**Status**: Draft
-**Input**: User description: "Local, zero-shot document processing system for Traditional Chinese scanned PDF documents with template-based classification, alignment, and ROI extraction"
+**Last Aligned With Code**: 2026-05-26
+**Status**: Implemented — this spec reflects current production code in `vlm_pdf_recognizer/`
+**Input**: Local, zero-shot document processing system for Traditional Chinese scanned PDF documents with template-based classification, geometric alignment, and ROI extraction. This feature delivers the preprocessing half of the pipeline; recognition is covered by Features 002 / 004.
+
+---
+
+## Scope Recap (Current Implementation)
+
+This feature owns the path from **raw scan → aligned image with cropped ROI images**:
+
+```
+input PDF / image
+  → PyMuPDF page conversion (preprocessing/pdf_converter.py)
+  → SIFT feature extraction (alignment/feature_extractor.py, doc cap 5000 features)
+  → FLANN matching + Lowe ratio + RANSAC voting (alignment/template_matcher.py)
+  → Perspective warp via homography (alignment/geometric_corrector.py)
+  → ROI crop from aligned image (extraction/roi_extractor.py)
+  → ProcessingResult with extracted_rois + visualization image
+```
+
+Downstream stages (AIP content detection, VLM text recognition, validation, case aggregation) are owned by Features 002/004 and `vlm_pdf_recognizer/recognition/`.
+
+---
 
 ## User Scenarios & Testing *(mandatory)*
 
-<!--
-  IMPORTANT: User stories should be PRIORITIZED as user journeys ordered by importance.
-  Each user story/journey must be INDEPENDENTLY TESTABLE - meaning if you implement just ONE of them,
-  you should still have a viable MVP (Minimum Viable Product) that delivers value.
-  
-  Assign priorities (P1, P2, P3, etc.) to each story, where P1 is the most critical.
-  Think of each story as a standalone slice of functionality that can be:
-  - Developed independently
-  - Tested independently
-  - Deployed independently
-  - Demonstrated to users independently
--->
+### User Story 1 — Process Single Scanned PDF (Priority: P1)
 
-### User Story 1 - Process Single Scanned Document (Priority: P1)
+A user has a scanned PDF or image of a structured Traditional Chinese form (e.g. authorization letter). They need the system to (a) decide which template it matches, (b) align it to the template's canonical pixel grid, and (c) crop out every pre-defined ROI region for downstream content detection.
 
-A user has a scanned PDF document (enterprise or contractor type) with potential watermarks, skew, and handwritten annotations. They need the system to automatically identify which template it matches, remove visual noise, align it to the standard template, and extract specific regions of interest.
-
-**Why this priority**: This is the core use case - without this, the system cannot deliver any value. All other features depend on this working correctly.
-
-**Independent Test**: Can be fully tested by providing a single scanned document as input and verifying that (1) correct template is identified, (2) document is geometrically aligned, (3) ROI bounding boxes are correctly overlaid on output image, and delivers a validated, aligned document with marked ROIs.
+**Independent Test**: Drop one PDF into `input/<date>/<case_id>/`, run `python main.py --disable-vlm`, and confirm:
+- `output/<date>/<case_id>/<doc>_visualization.png` shows the aligned image with all ROI boxes drawn.
+- `output/<date>/<case_id>/metadata/<doc>_metadata.json` reports `matched_template_id`, `confidence_score` (RANSAC inlier count), and per-ROI bounding boxes.
 
 **Acceptance Scenarios**:
 
-1. **Given** a scanned contractor document with blue watermarks and 5-degree rotation, **When** user provides the document to the system, **Then** system identifies it as contractor_1 or contractor_2 template, removes watermarks, corrects rotation, and outputs aligned image with ROI boundaries drawn
-2. **Given** a scanned enterprise document with handwritten notes and stamps, **When** user processes the document, **Then** system preserves black/dark blue pen marks and red stamps while removing colored backgrounds, aligns to enterprise_1 template, and marks all configured ROI regions
-3. **Given** a clean scanned document with minimal skew, **When** user processes the document, **Then** system completes alignment in under 10 seconds and outputs verification image showing matched template and ROI boxes
+1. **Given** a scanned `contractor_1` form with mild rotation (≤ 15°), **When** the user runs the pipeline, **Then** the system selects `contractor_1`, warps to template dimensions pixel-for-pixel, and draws all 13 ROI bounding boxes.
+2. **Given** a multi-page PDF (3 pages, different template per page), **When** the pipeline runs, **Then** each page becomes its own `ProcessingResult` with an independent template match.
+3. **Given** an image-format input (`.png`, `.jpg`), **When** the pipeline runs, **Then** behaviour matches PDF input (single-page processing path).
 
 ---
 
-### User Story 2 - Handle Unknown or Poor Quality Documents (Priority: P2)
+### User Story 2 — Reject Documents That Don't Match Any Template (Priority: P1)
 
-A user attempts to process a document that either doesn't match any known template or has such poor quality that feature matching fails. The system needs to clearly indicate failure rather than producing incorrect results.
+A user submits a document that does not correspond to any registered template (e.g. a passport scan, or a contractor form with a totally different layout). The system must clearly fail rather than warp arbitrary content and produce misleading downstream results.
 
-**Why this priority**: Error handling prevents misleading outputs and saves user time by immediately flagging problematic inputs rather than producing unreliable results.
-
-**Independent Test**: Can be fully tested by providing (1) a document that matches none of the three templates, (2) a severely blurred document, and (3) a document with fewer than 50 good feature matches, then verifying appropriate error messages are returned for each case.
+**Independent Test**: Place an unrelated document in `input/<date>/<case_id>/`, run the pipeline, and confirm `ProcessingResult.success=False`, `matched_template_id="unknown"`, and `error_message` includes per-template inlier breakdowns.
 
 **Acceptance Scenarios**:
 
-1. **Given** a completely different document type (e.g., passport scan), **When** user attempts to process it, **Then** system returns "Unknown Document" error with message indicating no template matched
-2. **Given** a heavily corrupted or blurred scan with insufficient feature points, **When** user processes the document, **Then** system returns error stating "Insufficient feature matches (found X, need 50+)"
-3. **Given** a document that partially matches multiple templates with similar confidence, **When** user processes it, **Then** system either selects the highest-confidence match or returns ambiguity warning with match scores for each template
+1. **Given** a document whose best template has fewer than **50 RANSAC inliers**, **When** matching runs, **Then** `UnknownDocumentError` is raised inside `match_templates()` and converted to a failed `ProcessingResult` with `matched_template_id="unknown"`.
+2. **Given** a heavily blurred / low-DPI scan, **When** SIFT extracts insufficient descriptors, **Then** matching reports zero inliers for all templates and the document is rejected.
+3. **Given** ambiguous matches (multiple templates near threshold), **When** voting runs, **Then** the system picks the template with the **maximum inlier count** (winner-takes-all, no margin enforcement).
 
 ---
 
-### User Story 3 - Batch Process Multiple Documents (Priority: P3)
+### User Story 3 — Batch Process Nested Case Directories (Priority: P1)
 
-A user has a folder containing multiple scanned documents of different types (mix of enterprise and contractor forms). They want to process all documents in one operation with the system automatically routing each to its correct template.
+The production input is organised as `input/<date>/<case_id>/*.pdf` (multiple PDFs per case, multiple cases per date). The system walks this nested structure, mirrors the layout under `output/`, and continues on per-file failures.
 
-**Why this priority**: Improves efficiency for users with many documents, but depends on P1 working reliably first. This is a convenience enhancement rather than core functionality.
-
-**Independent Test**: Can be fully tested by creating a folder with 10 mixed documents (3 enterprise_1, 4 contractor_1, 3 contractor_2), processing them all, and verifying each is correctly classified and aligned to its respective template with outputs saved to organized subdirectories.
+**Independent Test**: Populate `input/2026-05-25/case_a/` with three PDFs and `input/2026-05-25/case_b/` with two PDFs. Run the pipeline. Confirm `output/2026-05-25/case_a/` and `output/2026-05-25/case_b/` each contain visualisations and metadata; failures appear in the per-date `VLM_results.json`.
 
 **Acceptance Scenarios**:
 
-1. **Given** a directory containing 20 mixed document types, **When** user initiates batch processing, **Then** system processes all documents, outputs aligned images with ROI boxes to organized folders by template type, and generates summary report showing count per template type
-2. **Given** a batch where 3 out of 15 documents fail matching, **When** batch processing completes, **Then** system successfully processes 12 documents, moves 3 failed documents to error folder, and provides detailed error log listing why each failed
-3. **Given** a batch processing job in progress, **When** user monitors the process, **Then** system displays progress indicator showing current document number and template classification results
+1. **Given** `input/<date>/<case_id>/*.pdf` with mixed templates, **When** `main.py` runs, **Then** outputs land in the mirrored `output/<date>/<case_id>/` paths with one visualisation per page.
+2. **Given** one file in the batch fails (e.g. unreadable PDF), **When** processing continues, **Then** other files complete normally and the failure is recorded with `success=False`.
+3. **Given** a batch spanning multiple dates, **When** processing finishes, **Then** each date directory gets its own `VLM_results.json` (preprocessing-only stats when `--disable-vlm`).
 
 ---
 
-### Edge Cases
+### Edge Cases (Behaviour in Code Today)
 
-- What happens when a document is upside-down or rotated 180 degrees?
-- How does system handle documents photographed instead of scanned (with perspective distortion)?
-- What if a document has extreme skew (>30 degrees rotation)?
-- How does system handle partially cropped documents missing sections?
-- What if watermark colors overlap with actual content (e.g., blue ink pen on blue watermark)?
-- How does system behave when template images themselves are corrupted or missing?
-- What if JSON configuration file has invalid or out-of-bounds ROI coordinates?
-- How does system handle multi-page PDFs versus single-page images?
-- What happens when processing on CPU versus GPU - are results identical?
-- How does system perform when available RAM is insufficient for high-resolution scans?
+| Scenario | Current Behaviour |
+|---|---|
+| Document upside-down / rotated 180° | Homography handles in-plane rotation; if rotation is 180° **and** features remain symmetric enough, RANSAC will fail and `UnknownDocumentError` fires. No explicit orientation pre-flip. |
+| Photographed (perspective distortion) | Full 8-DOF homography in `findHomography` can correct moderate perspective. Extreme distortion → low inliers → reject. |
+| Skew > 30° | Likely rejected (insufficient inliers). No documented success guarantee. |
+| Partially cropped page | If enough of the page is visible to clear 50 inliers, alignment succeeds; cropped regions outside the warped frame become whitespace. |
+| Multi-page PDF | Each page processed independently (`pdf_to_images` returns one BGR array per page); each gets its own `ProcessingResult`. |
+| Failed PDF load | Caught in `process_file` → propagated as `ProcessingResult(success=False, error_message=...)`. |
+| Watermarks / coloured backgrounds | **No watermark removal step** — SIFT is robust to translucent watermarks, so the pipeline feeds the original BGR image directly to feature extraction. |
+
+---
 
 ## Requirements *(mandatory)*
 
 ### Functional Requirements
 
-- **FR-001**: System MUST support three document template types: enterprise_1, contractor_1, and contractor_2
-- **FR-002**: System MUST load golden template images and their pre-computed SIFT features from data/ directory at initialization
-- **FR-003**: System MUST load ROI coordinate configurations from JSON files in data/ directory, where coordinates define bounding boxes (top-left to bottom-right)
-- **FR-004**: System MUST perform watermark removal using HSV color space thresholding to eliminate blue, light gray, and light red watermarks
-- **FR-005**: System MUST preserve black text, table lines, dark blue pen marks, and red stamps during watermark removal
-- **FR-006**: System MUST convert preprocessed images to pure binary (black and white, 0 and 255 only)
-- **FR-007**: System MUST extract SIFT feature points and descriptors from input documents
-- **FR-008**: System MUST match input document features against all three template types using FLANN-based matcher or BFMatcher
-- **FR-009**: System MUST identify document type based on voting mechanism - template with most good matches (inliers) wins
-- **FR-010**: System MUST compute Homography matrix using RANSAC algorithm to eliminate noise from handwriting and stamps
-- **FR-011**: System MUST apply perspective warp transformation to align input document to template coordinate system
-- **FR-012**: System MUST extract ROI regions from aligned document based on template-specific JSON coordinates
-- **FR-013**: System MUST overlay ROI bounding boxes on aligned output image for verification purposes
-- **FR-014**: System MUST save verification images to output/ directory
-- **FR-015**: System MUST cache computed SIFT features and Homography matrices for the three golden templates to avoid recomputation
-- **FR-016**: System MUST throw "Unknown Document" exception when number of good feature matches is below 50
-- **FR-017**: System MUST automatically detect and utilize GPU acceleration when available (with 4GB VRAM minimum), falling back to CPU when GPU is unavailable
-- **FR-018**: System MUST operate in vlmcv Python environment
-- **FR-019**: System MUST process scanned PDF documents containing Traditional Chinese text
-- **FR-020**: System MUST handle document skew, rotation, and positional offset through geometric correction
-- **FR-021**: System MUST accept both PDF files and image files (PNG, JPEG) as input
-- **FR-022**: System MUST convert each page of a multi-page PDF to a separate image, preserving original page dimensions
-- **FR-023**: System MUST process each PDF page independently, producing separate aligned outputs with ROI overlays for each page
-- **FR-024**: System MUST skip and continue processing remaining documents when a document fails in batch mode, logging errors for review
+- **FR-001**: System MUST support three document template types: `enterprise_1`, `contractor_1`, `contractor_2`. Template list lives in `vlm_pdf_recognizer/templates/template_loader.load_all_templates()`.
+- **FR-002**: System MUST load golden templates and their cached SIFT features from `data/<template_id>/` at startup via `DocumentProcessor._load_templates()`.
+- **FR-003**: System MUST load ROI coordinate configuration from `data/<template_id>/config.json` (auto-generated by `update_configs.py` from LabelMe annotations in `templates/location/`).
+- **FR-004**: System MUST process the original BGR image directly through SIFT — **no watermark removal, colour thresholding, or binarisation is applied before feature extraction.** (Removed because SIFT is robust to translucent watermarks and removing them was reducing feature richness.)
+- **FR-005**: System MUST extract SIFT keypoints and descriptors from input images with a cap of **5000 features for documents** (templates use unlimited features to maximise matching accuracy).
+- **FR-006**: System MUST match document descriptors against all loaded templates using **FLANN-based matcher (KDTree, trees=5, checks=50)** with **Lowe's ratio test (ratio = 0.7)**.
+- **FR-007**: System MUST compute homography per template using **`cv2.findHomography` with RANSAC (reprojection threshold = 5.0 pixels)**, returning the inlier mask.
+- **FR-008**: System MUST select the template with the **maximum RANSAC inlier count** (voting / winner-takes-all). No tie-break logic — `max(..., key=lambda m: m.inlier_count)` decides.
+- **FR-009**: System MUST raise `UnknownDocumentError` when the winning template has **fewer than 50 RANSAC inliers**, and convert that exception into a `ProcessingResult` with `matched_template_id="unknown"` and `success=False`.
+- **FR-010**: System MUST warp the original colour image to the matched template's pixel dimensions using `cv2.warpPerspective` (the aligned image becomes the canonical reference frame for ROI crop and AIP comparison).
+- **FR-011**: System MUST extract every ROI defined in the template config from the aligned image, producing `ExtractedROI` instances with `roi_id`, `bounding_box`, `description`, `visualization_color`, and `roi_image` (BGR crop).
+- **FR-012**: System MUST draw all ROI bounding boxes on the aligned image to produce a verification visualisation. (When VLM is enabled, this visualisation is later **overwritten** by Feature 002's colour-coded version.)
+- **FR-013**: System MUST persist the visualisation as `<base>_visualization.png` and per-document metadata as `metadata/<base>_metadata.json` under the mirrored case output directory.
+- **FR-014**: System MUST cache pre-computed SIFT keypoints + descriptors for each template at `data/<template_id>/template_features.pkl` so subsequent runs skip template feature extraction.
+- **FR-015**: System MUST accept input from a **nested directory layout** `input/<date>/<case_id>/<file>` and mirror that layout under `output/`. Supported extensions: `.pdf`, `.jpg`, `.jpeg`, `.png`.
+- **FR-016**: System MUST process multi-page PDFs (PyMuPDF / `fitz`) one page at a time, emitting one `ProcessingResult` per page with `page_number` set.
+- **FR-017**: System MUST continue processing remaining files when a single file errors, logging the failure to the batch summary rather than aborting.
+- **FR-018**: System MUST run end-to-end on CPU (SIFT, FLANN, warp, ROI crop — all CPU-bound OpenCV). GPU acceleration applies only to the downstream VLM stage (Feature 002), not to alignment.
+- **FR-019**: System SHOULD be invokable with `--disable-vlm` to run alignment + ROI extraction only (no Feature 002/004), for offline debugging of the alignment stage.
 
 ### Key Entities
 
-- **Golden Template**: Reference document image for each template type (enterprise_1, contractor_1, contractor_2) with pre-computed SIFT features stored in data/ directory
-- **Template Configuration**: JSON file containing template-specific metadata including ROI bounding box coordinates (top-left to bottom-right format)
-- **Input Document**: Scanned PDF or image file potentially containing watermarks, skew, handwritten annotations, and stamps
-- **ROI (Region of Interest)**: Specific rectangular area on template defined by bounding box coordinates, representing data field to be extracted
-- **Feature Match**: Pair of corresponding SIFT keypoints between input document and template, with quality metric (inlier/outlier)
-- **Homography Matrix**: 3x3 transformation matrix mapping input document coordinates to template coordinate system
-- **Verification Output**: Aligned document image with ROI bounding boxes overlaid, saved to output/ directory for validation
+| Entity | Module | Notes |
+|---|---|---|
+| `GoldenTemplate` | `vlm_pdf_recognizer/templates/__init__.py` | Holds `template_id`, `image_shape`, `keypoints`, `descriptors`, list of `ROI` definitions. |
+| `ROI` | `vlm_pdf_recognizer/templates/__init__.py` | Bounding box + metadata (`roi_id`, `description`, `visualization_color`). |
+| `ExtractedROI` | `vlm_pdf_recognizer/extraction/roi_extractor.py` | The cropped BGR pixel array plus the originating ROI metadata. |
+| `FeatureMatch` | `vlm_pdf_recognizer/alignment/template_matcher.py` | Per-template matching result (matches, inliers, homography). |
+| `TemplateMatchResult` | same | Winning template + all candidates for debugging. |
+| `ProcessingResult` | `vlm_pdf_recognizer/pipeline.py` | The dataclass returned per page: matched template, inlier count, aligned image, visualisation, list of `ExtractedROI`, success flag. |
+| `UnknownDocumentError` | `vlm_pdf_recognizer/alignment/template_matcher.py` | Raised when no template clears the 50-inlier floor. |
+
+---
 
 ## Success Criteria *(mandatory)*
 
-### Measurable Outcomes
+These are operational targets observed on RTX 4080 Laptop / Ubuntu (the development reference machine — see README "Performance" table for source of truth):
 
-- **SC-001**: System correctly identifies document template type with 95% accuracy for documents with standard quality scans
-- **SC-002**: System processes single document from input to verified output in under 10 seconds on CPU-only environment
-- **SC-003**: System processes single document in under 3 seconds when GPU acceleration is available
-- **SC-004**: Watermark removal preserves 100% of black text and table lines while eliminating at least 90% of colored watermark pixels
-- **SC-005**: Geometric alignment achieves pixel-level accuracy within 5 pixels RMSE (Root Mean Square Error) when compared to golden template
-- **SC-006**: System successfully processes documents with skew up to 15 degrees without manual intervention
-- **SC-007**: ROI extraction accuracy achieves 98% correct boundary detection when validated against ground truth annotations
-- **SC-008**: System operates on hardware with as little as 4GB VRAM (GPU) or 8GB RAM (CPU-only mode)
-- **SC-009**: Cached template features reduce subsequent processing time by at least 40% compared to computing features on every run
-- **SC-010**: Error detection correctly rejects 100% of documents that don't match any template (no false positives)
-- **SC-011**: System processes batch of 100 documents with less than 3% failure rate for standard quality scans
+- **SC-001**: For documents in scope (correctly photographed scans of the three template types), the correct template wins by inlier count (no quantitative accuracy benchmark currently tracked in tests).
+- **SC-002**: End-to-end per-page time for the alignment stage is **≤ 1 second** (PDF conversion < 100 ms, SIFT 100–300 ms, FLANN+RANSAC 200–500 ms, warp 50–100 ms, ROI crop < 100 ms).
+- **SC-003**: When `--disable-vlm` is set, no VLM dependencies are required for the alignment pipeline to run.
+- **SC-004**: Template feature cache (`template_features.pkl`) reduces subsequent startup time relative to recomputing SIFT on each run.
+- **SC-005**: Documents below the 50-inlier threshold are flagged with `matched_template_id="unknown"` and `success=False` rather than aligned to a random template.
+- **SC-006**: A failing file does not abort the batch — remaining files complete and the failure is surfaced in the per-date `VLM_results.json` and stdout summary.
+
+---
 
 ## Assumptions
 
-1. **Input Format**: System accepts both PDF files and image formats (PNG, JPEG). Multi-page PDFs are processed with each page converted to a separate image, preserving original dimensions.
-2. **Template Stability**: Assuming the three template types (enterprise_1, contractor_1, contractor_2) are fixed and won't change frequently. New template addition is not in scope.
-3. **Language Processing**: System focuses on visual processing (alignment and extraction) only. OCR or text recognition of Traditional Chinese characters is explicitly out of scope for this phase.
-4. **Watermark Colors**: Assuming watermarks are primarily blue, light gray, or light red. Other watermark colors may not be effectively removed.
-5. **Document Quality**: Assuming scanned documents are at least 150 DPI resolution. Lower resolution may cause feature matching failures.
-6. **Hardware Access**: Assuming system has exclusive access to GPU when available (no resource contention with other applications).
-7. **Golden Template Quality**: Assuming golden template images are high-quality, clean scans without any defects or artifacts.
-8. **ROI Coordinates**: Assuming JSON configuration files are manually created and validated before system deployment. No runtime validation or coordinate correction is performed.
-9. **File System Access**: Assuming system has read access to data/ directory and write access to output/ directory.
-10. **Python Environment**: Assuming vlmcv environment is pre-configured with necessary OpenCV and vision processing libraries.
+1. **Input layout**: Production input always follows `input/<date>/<case_id>/<file>`. `main.py:scan_nested_input()` ignores any file outside that two-level nesting.
+2. **Template stability**: The three template types are fixed. Adding a new template requires (a) a new entry in `load_all_templates()`, (b) an annotated `templates/location/<id>.json`, and (c) re-running `update_configs.py`.
+3. **Language scope**: This feature is purely visual — it does **not** read or interpret text content. Text recognition is owned by Feature 002 (VLM) and Feature 004 (AIP detects presence, not text).
+4. **DPI & quality**: Scans are assumed to be at a resolution that yields ≥ 50 inliers against the template. No automatic upscaling.
+5. **Template assets**: `templates/images/<id>.jpg` and `templates/location/<id>.json` exist and are in sync with `data/<template_id>/config.json` (regenerate via `update_configs.py` whenever annotations change).
+6. **Filesystem**: Read access to `data/` and `input/`, write access to `output/`.
+
+---
 
 ## Out of Scope
 
-- OCR (Optical Character Recognition) or text extraction from ROI regions
-- Training custom models or fine-tuning existing models
-- Support for document types beyond the three predefined templates
-- Real-time video stream processing
-- Automatic template creation or learning from new document types
-- Cloud-based processing or API deployment
-- User interface or web application (command-line/script execution only)
-- Handling color documents that are not primarily black text on white/colored background
-- Processing documents in languages other than Traditional Chinese (though system is language-agnostic for visual processing)
-- Data privacy compliance features (encryption, anonymization)
-- Document classification beyond template matching (e.g., semantic content analysis)
+- OCR / text extraction → owned by Feature 002.
+- AIP / pixel-level content presence detection → owned by Feature 004.
+- Validation logic (VX1 priority, date OR, AND of remaining fields, VX2 must be checked) → owned by Feature 002 (`vlm_recognizer.calculate_results_status`).
+- Case-level aggregation (three-template completeness check) → owned by Feature 002 (`output.py:_aggregate_case_results`).
+- Watermark removal / colour thresholding / binarisation (removed from the pipeline).
+- Real-time / streaming input.
+- Web UI or cloud deployment — CLI batch only.
+- Adding new template types at runtime (configuration is offline via `update_configs.py`).
+
+---
 
 ## Dependencies
 
-1. **OpenCV Library**: Core dependency for all image processing, feature detection (SIFT), feature matching, and geometric transformations
-2. **PDF Processing Library**: Library for converting PDF pages to images (e.g., pdf2image, PyMuPDF) while preserving original dimensions
-3. **Python Environment (vlmcv)**: Pre-configured environment with vision and machine learning libraries
-4. **GPU Drivers**: CUDA-compatible drivers if GPU acceleration is to be utilized (optional, system must work without)
-5. **Golden Template Assets**: Three clean template images must exist in data/ directory before system initialization
-6. **Configuration Files**: Three JSON files (one per template) defining ROI coordinates must exist in data/ directory
-7. **File System**: Read/write permissions for data/ and output/ directories
-8. **Compute Resources**: Minimum 4GB VRAM (GPU mode) or 8GB RAM (CPU mode)
+- **OpenCV ≥ 4.8** — SIFT, FLANN, RANSAC, `warpPerspective`, image I/O.
+- **PyMuPDF (`fitz`) ≥ 1.23** — PDF → image.
+- **NumPy ≥ 1.24** — array operations.
+- **Pillow ≥ 10.0** — auxiliary image I/O.
+- **`update_configs.py`** must have been run at least once to populate `data/<template_id>/config.json`, `blank_rois/`, and `template_features.pkl`.
 
-## Clarifications
+---
 
-**PDF Handling**: System accepts both image files and PDF files. For PDF inputs, system converts each page to a separate image while preserving original dimensions. Multi-page PDFs result in multiple processed outputs (one per page). Template images are provided as image files.
+## Notes for Spec-vs-Code Reviewers
 
-**Template Match Ambiguity**: System always uses highest-scoring template (winner-takes-all approach) regardless of confidence margin between templates.
-
-**Batch Processing Error Handling**: Failed documents are skipped, batch processing continues with remaining documents, and errors are logged for later review.
+- The `--disable-vlm` flag in `main.py` is the cleanest way to exercise this feature in isolation.
+- The visualisation written by this feature is intentionally **overwritten** by `output.save_vlm_visualization()` when VLM is enabled — that is by design, not a bug.
+- "Confidence score" in `ProcessingResult.confidence_score` is the **RANSAC inlier count**, not a normalised probability.

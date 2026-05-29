@@ -2,7 +2,28 @@
 
 **Feature Branch**: `003-vlm-auxiliary-roi-comparison`
 **Created**: 2025-12-30
-**Status**: Draft
+**Last Aligned With Code**: 2026-05-26
+**Status**: ⚠️ **SUPERSEDED BY FEATURE 004** — DO NOT IMPLEMENT FROM THIS SPEC.
+
+> **What happened**: this spec proposed a SIFT-feature-based "auxiliary" ROI comparison that would match a document ROI against a cached SIFT-feature descriptor for the blank template ROI, and decide `auxiliary_has_content` from the inlier ratio.
+>
+> **Why it was superseded**: during prototyping, SIFT-on-ROIs proved unreliable for small fields (checkboxes, single-digit numbers) because SIFT requires keypoint richness that small / homogeneous ROIs lack. We replaced this approach with **AIP (Advanced Image Processing)** — direct BGR pixel difference between the document ROI and the **blank ROI image** (not its SIFT features), with ECC sub-pixel alignment to handle local registration noise.
+>
+> **Where the work actually went**:
+> - **Feature 004 — `specs/004-vlm-roi-preprocessing/`** owns the current implementation.
+> - **`vlm_pdf_recognizer/recognition/roi_preprocessor.py`** has the production AIP pipeline.
+> - **`vlm_pdf_recognizer/alignment/blank_template_roi_cache.py`** caches the blank reference **images** (PNG files), not SIFT features.
+> - Production validation logic (VX1 priority, date OR, others AND including VX2, case-level three-template completeness) is documented in [specs/002-vlm-roi-recognition/spec.md](../002-vlm-roi-recognition/spec.md).
+>
+> **What remains useful from this spec**:
+> - The user-story intuitions (skip VLM when ROI is clearly blank; have a deterministic pixel-based has_content; preserve checkbox heuristics) carried through to Feature 004.
+> - The validation-logic shape (VX1 priority, date OR, others AND) is now in Feature 002.
+>
+> **Action for readers**: ignore the FRs below — they describe an approach that does not exist in production. Read [Feature 004 spec](../004-vlm-roi-preprocessing/spec.md) instead.
+
+---
+
+## ORIGINAL (SUPERSEDED) DRAFT BELOW — preserved for historical context only.
 **Input**: User description: "VLM輔助辨識功能
 1. 詳細閱讀現在所有的程式碼和文件,不能遺失或修改錯誤現有的運作功能和邏輯。
 2. 新功能要完美整合銜接到現有的程式碼中,不能有錯誤或冗餘。

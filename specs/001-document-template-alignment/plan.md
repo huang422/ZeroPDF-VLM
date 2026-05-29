@@ -1,197 +1,119 @@
 # Implementation Plan: Document Template Alignment & ROI Extraction
 
 **Branch**: `001-document-template-alignment` | **Date**: 2025-12-23 | **Spec**: [spec.md](spec.md)
-**Input**: Feature specification from `/specs/001-document-template-alignment/spec.md`
-
-**Note**: This template is filled in by the `/speckit.plan` command. See `.specify/templates/commands/plan.md` for the execution workflow.
+**Last Aligned With Code**: 2026-05-26
+**Status**: Implemented — this plan now reflects the production design rather than the original draft. Drifts from the original draft are noted inline.
 
 ## Summary
 
-Build a local, zero-shot document processing system that automatically classifies scanned PDF documents (Traditional Chinese) into one of three template types (enterprise_1, contractor_1, contractor_2), removes watermarks via HSV thresholding, aligns documents to golden templates using SIFT feature matching and homography transformation, and extracts predefined ROI regions with bounding box visualization. System operates on CPU or GPU (4GB VRAM min) using OpenCV for all computer vision operations.
+Build the alignment-stage half of a local, zero-shot document-recognition pipeline for Traditional Chinese forms. The feature ingests scanned PDFs / images, classifies each page to one of three templates (`contractor_1`, `contractor_2`, `enterprise_1`) using SIFT + FLANN + RANSAC voting, warps to the template's canonical pixel grid via homography, and crops every pre-defined ROI for the downstream AIP + VLM stages. Everything runs on CPU; no model training is involved.
+
+> **Drift from original draft**: the draft listed HSV watermark removal as a step. That step was deleted because SIFT is robust to translucent watermarks and removing them was reducing feature richness — production code feeds the original BGR image directly to SIFT (see `pipeline.py:97-103`).
 
 ## Technical Context
 
-**Language/Version**: Python 3.9+ (vlmcv environment)
-**Primary Dependencies**:
-- OpenCV (cv2) 4.x - SIFT feature extraction, feature matching, homography, perspective transforms
-- NumPy - Array operations and image manipulation
-- PyMuPDF (fitz) - PDF to image conversion with dimension preservation
-
-**Storage**: File-based - Golden templates + JSON configs in data/, outputs to output/
-**Testing**: pytest with opencv-python testing utilities
-**Target Platform**: Linux (primary), CPU-only or CUDA-enabled GPU (4GB+ VRAM)
-**Project Type**: Single project (command-line tool/library)
-**Performance Goals**:
-- CPU mode: <10 seconds per document
-- GPU mode: <3 seconds per document
-- Batch: 100 documents with <3% failure rate
-
-**Constraints**:
-- 4GB VRAM minimum (GPU mode) or 8GB RAM (CPU mode)
-- Zero-shot (no training) - template matching only
-- Preserve original image dimensions through PDF conversion
-- SIFT feature cache persistence for golden templates
-
-**Scale/Scope**:
-- 3 document templates (enterprise_1, contractor_1, contractor_2)
-- Single document + batch processing modes
-- Multi-page PDF support (each page processed independently)
+| Item | Value |
+|---|---|
+| Language | Python 3.9+ |
+| Image processing | OpenCV ≥ 4.8 (SIFT, FLANN, RANSAC, `warpPerspective`) |
+| PDF | PyMuPDF / `fitz` ≥ 1.23 |
+| Array math | NumPy ≥ 1.24 |
+| Storage | Pure filesystem — `data/`, `input/`, `output/`. No DB. |
+| Tests | pytest, fixtures in `tests/` |
+| Hardware | CPU-bound. GPU only matters for the downstream VLM stage (Feature 002), **not** this stage. |
+| Throughput | 3–5 s end-to-end per page on RTX 4080 Laptop (alignment stage alone is < 1 s; VLM dominates). |
 
 ## Constitution Check
 
-*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
+See [.specify/memory/constitution.md](../../.specify/memory/constitution.md). Compliance highlights:
 
-**Status**: ⚠️ No project constitution defined - using default best practices
-
-Since the constitution file is a template placeholder, applying standard software engineering principles:
-
-✅ **Modularity**: Design as library with CLI interface (passes)
-✅ **Testability**: pytest-based testing planned (passes)
-✅ **Simplicity**: Single-purpose tool, no over-engineering (passes)
-✅ **Documentation**: Spec + plan + quickstart planned (passes)
-
-No violations detected. Will re-check after Phase 1 design.
+- **Local-first**: All alignment runs on the user's machine. No network calls during this stage.
+- **Zero training**: SIFT + homography only; no model is trained or fine-tuned.
+- **Determinism on the alignment path**: RANSAC has a seed in practice via OpenCV defaults; the same input + template set yields the same template winner.
+- **Graceful degradation**: A non-matching document becomes a logged `success=False` row, not a crash.
 
 ## Project Structure
 
 ### Documentation (this feature)
-
 ```text
-specs/[###-feature]/
-├── plan.md              # This file (/speckit.plan command output)
-├── research.md          # Phase 0 output (/speckit.plan command)
-├── data-model.md        # Phase 1 output (/speckit.plan command)
-├── quickstart.md        # Phase 1 output (/speckit.plan command)
-├── contracts/           # Phase 1 output (/speckit.plan command)
-└── tasks.md             # Phase 2 output (/speckit.tasks command - NOT created by /speckit.plan)
+specs/001-document-template-alignment/
+├── spec.md          # Source of truth for behaviour
+├── plan.md          # This file
+├── research.md      # Original technical choices (SIFT params, RANSAC threshold)
+├── data-model.md    # Dataclass reference
+├── quickstart.md    # How to exercise this stage alone
+├── tasks.md         # Historical implementation task list (all completed)
+└── checklists/
 ```
 
-### Source Code (repository root)
-
+### Source Code (current production layout — note differences from the original draft)
 ```text
 vlm_pdf_recognizer/
 ├── __init__.py
+├── pipeline.py                  # DocumentProcessor orchestrates this feature
 ├── preprocessing/
-│   ├── __init__.py
-│   ├── watermark_removal.py    # HSV thresholding, binarization
-│   └── pdf_converter.py         # PDF to image conversion (multi-page)
+│   └── pdf_converter.py         # PyMuPDF page → BGR ndarray
 ├── alignment/
-│   ├── __init__.py
-│   ├── feature_extractor.py    # SIFT feature extraction
-│   ├── template_matcher.py     # Feature matching, voting, classification
-│   └── geometric_corrector.py  # Homography, perspective warp
+│   ├── feature_extractor.py     # SIFT (doc cap 5000, templates unlimited)
+│   ├── template_matcher.py      # FLANN + Lowe + RANSAC voting; raises UnknownDocumentError
+│   ├── geometric_corrector.py   # warpPerspective wrapper
+│   └── blank_template_roi_cache.py   # cache used by Feature 004 — not by this feature
 ├── extraction/
-│   ├── __init__.py
-│   └── roi_extractor.py        # ROI extraction, bounding box overlay
+│   └── roi_extractor.py         # Crop ROIs from aligned image; draw_roi_boxes
 ├── templates/
-│   ├── __init__.py
-│   ├── template_loader.py      # Load golden templates + JSON configs
-│   └── template_cache.py       # SIFT feature caching
-├── pipeline.py                  # Main processing pipeline orchestration
-├── batch_processor.py           # Batch processing with error handling
-└── cli.py                       # Command-line interface
+│   ├── __init__.py              # ROI + GoldenTemplate dataclasses
+│   ├── template_loader.py       # Iterate templates from data/
+│   └── template_cache.py        # SIFT keypoint/descriptor pickle cache
+├── recognition/                 # OWNED BY FEATURES 002 / 004 — not this feature
+└── output.py                    # OWNED BY FEATURES 002 / 004 — not this feature
 
-tests/
-├── unit/
-│   ├── test_watermark_removal.py
-│   ├── test_feature_extraction.py
-│   ├── test_template_matching.py
-│   ├── test_geometric_correction.py
-│   └── test_roi_extraction.py
-├── integration/
-│   ├── test_pipeline_single.py
-│   ├── test_pipeline_batch.py
-│   └── test_pdf_conversion.py
-└── fixtures/
-    ├── sample_docs/             # Test documents
-    └── golden_templates/        # Test templates
-
-data/                            # Golden templates + configs (runtime)
-├── enterprise_1/
-│   ├── template.png
-│   ├── template_features.pkl   # Cached SIFT features
-│   └── config.json             # ROI coordinates
-├── contractor_1/
-│   └── [same structure]
-└── contractor_2/
-    └── [same structure]
-
-output/                          # Processed outputs (runtime)
-└── [generated at runtime]
+main.py                          # Batch entry point (input/<date>/<case_id>/*.pdf walk)
 ```
 
-**Structure Decision**: Single project layout chosen as this is a standalone document processing tool. Core processing modules (preprocessing, alignment, extraction) separated by functional responsibility. Template management isolated in dedicated module. CLI provides entry point for both single and batch processing modes.
+**Notable deltas from the draft plan:**
 
-## Complexity Tracking
+| Draft said | Production is |
+|---|---|
+| `preprocessing/watermark_removal.py` | Doesn't exist (removed). |
+| `batch_processor.py` | Folded into `main.py` (the orchestrator). |
+| `cli.py` | Folded into `main.py`. |
+| `data/<id>/template.png` | `templates/images/<id>.jpg`; the `data/` dir holds generated config + features, not the golden image. |
+| Output `output/<timestamp>_<file>_pageN/` | `output/<date>/<case_id>/` mirroring the input layout. |
 
-> **Fill ONLY if Constitution Check has violations that must be justified**
+## Complexity Notes
 
-No violations detected. System follows simplicity principles:
-- Single-purpose tool (document alignment only)
-- File-based storage (no database complexity)
-- Modular design with clear separation of concerns
-- Minimal dependencies (OpenCV, NumPy, PyMuPDF)
+- **Why feature cap = 5000 for documents** (FR-005 in spec): unlimited SIFT on full-resolution scans was slow and yielded diminishing returns; 5000 captures dominant document structure while keeping matching under ~500 ms.
+- **Why minimum inlier = 50** (FR-009 in spec): empirically the lowest inlier count consistent with a correctly aligned warp. Below this, homography becomes noisy.
+- **Why winner-takes-all (no margin enforcement)**: the three templates are sufficiently distinct visually that ties are rare; adding a margin rule would only reject borderline-correct documents.
 
----
+## Phase 0 — Research (completed)
 
-## Phase 0: Research (Completed)
+Decisions captured in [research.md](./research.md):
+- PDF library: PyMuPDF.
+- SIFT contrast/edge thresholds: defaults.
+- FLANN: KDTree, trees=5, checks=50.
+- Lowe ratio: 0.7. RANSAC reproj threshold: 5.0 px.
+- Feature cache: pickle, invalidated by mtime.
 
-✅ **research.md** created with technical decisions:
-- PDF Library: PyMuPDF (fitz) selected
-- SIFT Parameters: Optimized for document matching
-- Watermark Removal: HSV thresholding strategy
-- Homography: RANSAC with 5.0 pixel threshold
-- ROI Config: JSON format defined
-- Feature Cache: Pickle serialization approach
+Open items at the time → all now resolved by the implementation.
 
-**All NEEDS CLARIFICATION items resolved.**
+## Phase 1 — Design (completed)
 
----
+Captured in [data-model.md](./data-model.md). The original 8-entity sketch was simplified during implementation:
 
-## Phase 1: Design (Completed)
+- **Dropped** `InputDocument` and `DocumentPage` — they were just transient lists of ndarrays.
+- **Dropped** `BatchProcessingJob` — `main.py` orchestrates without a dedicated entity.
+- **Added** `BlankTemplateROICache` (lives here architecturally but is consumed by Feature 004).
 
-✅ **data-model.md** created defining 8 core entities:
-- GoldenTemplate, ROI, InputDocument, DocumentPage
-- FeatureMatch, ProcessingResult, ExtractedROI, BatchProcessingJob
-- Data flow and state transitions documented
-- File structure mapping defined
+## Phase 2 — Tasks
 
-✅ **quickstart.md** created with:
-- Installation instructions
-- Setup guide for golden templates
-- Basic usage examples (single + batch processing)
-- Troubleshooting guide
+See [tasks.md](./tasks.md). All implementation tasks are complete. New work for this stage now flows through the standard PR review process, not through `/speckit.tasks` — see the project-level `DEVELOPMENT_WORKFLOW.md` for the current workflow.
 
-✅ **Agent context updated** (CLAUDE.md):
-- Language: Python 3.9+ (vlmcv)
-- Storage: File-based
-- Project type: Single CLI tool
+## Maintenance Notes
 
----
+When changing this stage, prefer touching:
+- **Matching parameters** (Lowe ratio, RANSAC threshold, inlier floor): edit `template_matcher.py` and update FR-006 to FR-009 in `spec.md`.
+- **Feature cap**: edit `feature_extractor.py` and update FR-005.
+- **Input layout**: edit both `main.py:scan_nested_input()` and FR-015.
 
-## Constitution Re-Check (Post-Design)
-
-**Status**: ✅ PASSED - No violations introduced
-
-**Design Review**:
-✅ **Modularity**: 6 functional modules (preprocessing, alignment, extraction, templates, pipeline, batch)
-✅ **Testability**: Unit + integration test structure defined
-✅ **Simplicity**: No unnecessary abstractions, direct file I/O
-✅ **Documentation**: Complete spec + research + data model + quickstart
-
-**Complexity Justified**:
-- Feature caching: Required for 40% performance improvement (SC-009)
-- RANSAC algorithm: Required for robustness against handwriting noise (FR-010)
-- Multi-stage pipeline: Necessary for watermark removal → alignment → extraction workflow
-
----
-
-## Phase 2: Next Steps
-
-To generate actionable tasks, run:
-
-```bash
-/speckit.tasks
-```
-
-This will create `tasks.md` with dependency-ordered implementation tasks based on the plan and design artifacts.
+Any change that affects observable output (e.g. visualisation colours, ROI metadata fields, error messages downstream of `UnknownDocumentError`) must also update `data-model.md` and the matching FR in `spec.md`.

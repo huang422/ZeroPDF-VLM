@@ -144,8 +144,8 @@ Scanned PDF / Image
 ## Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/your-org/VLM-pdfRecognizer.git
+# Clone the repository 
+git clone https://github.com/huang422/ZeroPDF-VLM
 cd VLM-pdfRecognizer
 
 # Create conda environment

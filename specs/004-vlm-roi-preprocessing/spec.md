@@ -1,313 +1,244 @@
-# Feature Specification: VLM-Assisted ROI Content Detection with Image Preprocessing
+# Feature Specification: AIP (Advanced Image Processing) — ROI Content Detection
 
 **Feature Branch**: `004-vlm-roi-preprocessing`
 **Created**: 2025-12-31
-**Status**: Draft
-**Input**: User description: "VLM輔助辨識功能roi影像處理"
+**Last Aligned With Code**: 2026-05-26
+**Status**: Implemented — this spec reflects current production code in `vlm_pdf_recognizer/recognition/roi_preprocessor.py` and `vlm_pdf_recognizer/alignment/blank_template_roi_cache.py`.
+
+---
+
+## Scope Recap (Current Implementation)
+
+This feature is the **pixel-level `has_content` detector**. For each non-title field, AIP compares the document ROI against the **blank reference ROI** for that template / field, and returns a deterministic boolean. Feature 002 (VLM) then handles text extraction.
+
+```
+ExtractedROI (Feature 001)            Blank ROI image
+       │                                    │ (from BlankTemplateROICache, populated by update_configs.py)
+       ▼                                    │
+  ┌────────────────────────────────────────┘
+  │
+  ▼
+┌─────────────────────────────────────────────────────┐
+│ ROIPreprocessor.preprocess_roi                       │
+│                                                      │
+│  1. Validate inputs (uint8, 3-channel BGR)           │
+│  2. Resize doc ROI to template ROI shape if needed   │
+│     (log warning if size diff > 10%)                 │
+│  3. ECC sub-pixel alignment (MOTION_EUCLIDEAN)       │
+│     → aligned doc ROI                                 │
+│  4. BGR absolute difference                          │
+│  5. Mean across channels → grayscale diff image      │
+│  6. mean_diff = mean(diff_gray) / 255.0              │
+│  7. Decision logic (next section)                    │
+│                                                      │
+│  → AIPResult { has_content, ink_ratio (mean_diff),   │
+│                processing_time_ms, processed_image } │
+└─────────────────────────────────────────────────────┘
+```
+
+### Decision Logic (Current Code)
+
+```python
+significant_threshold = 30                       # per-pixel diff threshold (0..255)
+significant_diff = diff_gray[diff_gray > significant_threshold]
+significant_ratio = len(significant_diff) / diff_gray.size
+
+if mean_diff > 0.15:
+    # Heuristic: high mean diff often means pre-printed text dominated
+    # the ROI (e.g. big1 with "負責人蓋章處" pre-printed text).
+    # Require ≥ 20% pixels above per-pixel threshold to count as actual content.
+    has_content = significant_ratio > 0.20
+else:
+    # Normal field path
+    has_content = mean_diff > MIN_ABSOLUTE_DENSITY_THRESHOLD  # 0.01
+```
+
+> **Drift from the original draft of this spec** (kept here for traceability):
+> - The draft specified a **6-step pipeline** (HSV saturation → grayscale diff → horizontal/vertical line morphology → noise removal → connected components → ink-ratio threshold). Production is **simpler**: ECC align → BGR mean diff → 2-tier threshold. The HSV channel, morphology, and connected-components stages were removed because (a) BGR-mean-diff was already discriminating well, (b) morphology added per-template tuning burden, (c) connected-components count added latency without clear accuracy gains.
+> - The draft specified 5 configurable thresholds (`DIFFERENCE_THRESHOLD`, `INK_RATIO_THRESHOLD`, `COMPONENT_COUNT_THRESHOLD`, `MIN_BLOB_AREA`, `MORPHOLOGY_LINE_RATIO`). Production has **two** constants: `MIN_ABSOLUTE_DENSITY_THRESHOLD = 0.01` and `significant_threshold = 30` (plus the inline `mean_diff > 0.15` and `significant_ratio > 0.20`).
+> - The draft specified saving 6 intermediate PNGs per ROI. Production saves **three**: `00_aligned_doc`, `01_diff_gray`, `02_final` (only when `DEBUG_ROI_PREPROCESSING=true` env var is set).
+> - The draft used `component_count` for the threshold. Production keeps the `component_count` slot in `AIPResult` for backwards compatibility but **leaves it `None`** — see `roi_preprocessor.py:219`.
+
+---
 
 ## User Scenarios & Testing *(mandatory)*
 
-### User Story 1 - Template ROI Baseline Generation (Priority: P1)
+### User Story 1 — Detect Filled vs Empty Fields (Priority: P1)
 
-During system initialization, administrators run the template configuration script to generate blank template ROI images for each field position. These blank template ROIs serve as reference baselines to differentiate pre-printed content (form borders, fixed text) from user-added content (signatures, stamps, handwriting).
+A user runs the pipeline on a populated `contractor_1` PDF. AIP needs to mark filled fields (name, company, stamp) as `has_content=True` and untouched fields (e.g. an unmarked checkbox, a date field left blank) as `False`. The VLM then runs only on the True ones.
 
-**Why this priority**: Foundation for the entire detection system. Without blank template ROI references, the preprocessing pipeline cannot distinguish between pre-printed form elements and actual user content.
-
-**Independent Test**: Run update_configs.py with template images, verify that blank template ROI images are saved to data/{template_id}/blank_rois/{field_id}.png for each field, and can be loaded for comparison.
-
-**Acceptance Scenarios**:
-
-1. **Given** contractor_1 template with 13 defined ROI coordinates, **When** configuration script executes, **Then** 13 blank template ROI images are extracted and saved with field IDs matching the configuration file.
-
-2. **Given** an updated template with modified ROI coordinates, **When** configuration re-runs, **Then** existing blank template ROIs are replaced with newly extracted ROIs matching the updated positions.
-
-3. **Given** a template with various ROI types (text fields, signature boxes, stamp areas), **When** blank ROIs are generated, **Then** each ROI preserves pre-printed elements like borders, baseline text, and fixed labels.
-
----
-
-### User Story 2 - ROI Content Detection via Template Difference Preprocessing (Priority: P1)
-
-When processing a document, the system preprocesses each extracted ROI by comparing it against the corresponding blank template ROI using a 6-step image processing pipeline. This pipeline removes pre-printed form elements, filters noise, and produces a binary has_content decision (True/False) indicating whether user content exists in that field.
-
-**Why this priority**: Core differentiator from existing VLM-only approach. The preprocessing pipeline provides pixel-level content detection that is more reliable for visual elements (stamps, signatures) than VLM zero-shot inference alone.
-
-**Independent Test**: Process a test document with mixed filled/unfilled fields, verify that the preprocessing pipeline correctly identifies filled fields (has_content=True) and empty fields (has_content=False), with intermediate processing images saved to output/processed_rois/ for inspection.
+**Independent Test**: Process a PDF where `person1` is filled with handwriting and `month` is blank. In the resulting `RecognitionResult` for those fields, confirm:
+- `AIP_has_content` matches expectation.
+- `AIP_ink_ratio` (mean diff, 0.0–1.0) is much higher for `person1` than `month`.
+- For the empty `month`, VLM is **skipped** (`content_text=None`, `inference_time_ms=0`).
 
 **Acceptance Scenarios**:
 
-1. **Given** a document ROI containing only the pre-printed form border (no signature added), **When** template difference preprocessing runs, **Then** the difference image shows minimal content, has_content is False, and no user content is detected.
-
-2. **Given** a document ROI with a faint red stamp (low saturation), **When** HSV preprocessing and template difference are applied, **Then** the stamp is preserved through saturation channel extraction, has_content is True, and the stamp is detected.
-
-3. **Given** a document ROI with handwritten signature, **When** preprocessing pipeline executes all 6 steps, **Then** signature strokes survive noise removal and morphological filtering, final connected components count exceeds threshold, and has_content is True.
-
-4. **Given** a document ROI with residual form line fragments after template difference, **When** morphological opening for horizontal/vertical lines runs, **Then** long straight lines are removed, signature/stamp content remains, and has_content determination is accurate.
+1. **Given** a blank stamp box (matches template), **When** AIP runs, **Then** `mean_diff < 0.01` → `has_content=False`.
+2. **Given** a stamp box with a red company seal, **When** AIP runs, **Then** `mean_diff > 0.01` → `has_content=True`.
+3. **Given** a stamp box with **only pre-printed placeholder text** `負責人蓋章處` (no actual stamp), **When** the document ROI happens to come out slightly mis-aligned (residual local registration error after Feature 001's homography), **Then** ECC re-alignment minimises text overlap error and the high-mean-diff branch (`mean_diff > 0.15`) checks `significant_ratio` — `False` if the residual is just text outline noise, `True` if the actual stamp ink dominates.
 
 ---
 
-### User Story 3 - Integrated VLM Recognition with Preprocessed Content Flags (Priority: P1)
+### User Story 2 — Be Robust to Sub-Pixel Misalignment (Priority: P1)
 
-After preprocessing determines has_content for each ROI, the system passes all ROIs (regardless of preprocessing result) to the VLM for content extraction. The VLM extracts text/numbers from fields, while the preprocessing result provides a more reliable has_content flag for validation logic.
+Feature 001's homography is global per page. Within a single ROI there can still be sub-pixel translation / rotation drift, especially when the scanner introduced local warping. AIP must correct for that before differencing — otherwise pre-printed text will "ghost" into the diff and create false positives.
 
-**Why this priority**: Maintains full VLM functionality for content extraction while improving content presence detection. Users benefit from both pixel-based detection accuracy and VLM semantic understanding.
-
-**Independent Test**: Process a document where preprocessing detects content in 10 fields, verify that VLM runs on all fields, extracts text where present, and output contains both VLM_has_content and AUX_has_content columns with potentially different values for debugging.
+**Independent Test**: Compare `00_aligned_doc.png` and the original cropped ROI (in `rois/`). They should differ by a tiny translation; the aligned version should overlay the blank template ROI better.
 
 **Acceptance Scenarios**:
 
-1. **Given** a field where preprocessing detects content (has_content=True), **When** VLM inference runs, **Then** VLM extracts the text/number content and VLM_has_content is populated based on VLM's own judgment.
-
-2. **Given** a field where preprocessing finds no content (has_content=False), **When** VLM inference still runs, **Then** VLM result is captured for comparison, but validation logic prioritizes the preprocessing result.
-
-3. **Given** a title field that skips preprocessing, **When** VLM recognition executes, **Then** title content is extracted, AUX_has_content is None, and VLM_has_content is not used for validation.
+1. **Given** a document ROI translated by 2–3 px relative to the template (typical scanner drift), **When** ECC alignment runs, **Then** the `aligned_doc` is shifted to overlay the template, and `mean_diff` for a genuinely blank field drops below 0.01.
+2. **Given** an ROI where ECC fails to converge (`cv2.error`), **When** the exception is caught, **Then** the original ROI is used and processing continues with a debug log line `ECC alignment failed: ... using original ROI`.
+3. **Given** doc ROI shape ≠ template ROI shape, **When** the size difference is > 10%, **Then** a warning is logged; the doc ROI is resized to template shape with `INTER_LINEAR` before continuing.
 
 ---
 
-### User Story 4 - Auxiliary-Priority Validation Logic (Priority: P1)
+### User Story 3 — Skip VLM on Detected-Empty Fields (Priority: P1)
 
-The system calculates overall document validation status using the preprocessing has_content results as the primary input, while preserving the existing validation logic rules (VX1 priority, date field OR, other fields AND). This replaces the previous VLM-based or auxiliary comparison-based validation with preprocessing-based validation.
+The whole point of AIP is to avoid wasting 0.5–1.5 s of GPU time on fields that are clearly blank. When AIP says `has_content=False`, Feature 002 must skip the VLM call.
 
-**Why this priority**: Accuracy improvement and consistency. The preprocessing pipeline is deterministic and explainable, providing more reliable validation than VLM hallucination-prone inference or simple SIFT feature matching.
-
-**Independent Test**: Process documents with known completion status, verify that results field correctly reflects validation using preprocessing has_content values, matching existing logic (VX1=True means results=False, all date fields False means results=False, any other field False means results=False).
+**Independent Test**: Process a document with 5 empty fields. Check the VLM inference time total: it should be ~5 × (VLM-per-roi) less than a document with all fields filled.
 
 **Acceptance Scenarios**:
 
-1. **Given** a document where VX1 preprocessing has_content is True (disagreement checkbox marked), **When** validation logic runs, **Then** results is immediately set to False regardless of other field values.
-
-2. **Given** a document where all date fields (year, month, date) have preprocessing has_content=False, **When** validation calculates results, **Then** results is False because date OR condition fails.
-
-3. **Given** a document where at least one date field has preprocessing has_content=True and all other required fields have preprocessing has_content=True, **When** validation runs, **Then** results is True.
-
-4. **Given** a document where one required field (e.g., company1) has preprocessing has_content=False, **When** validation logic executes, **Then** results is False because the AND condition for other fields fails.
+1. **Given** `aip_result.has_content=False` for a non-checkbox field, **When** Feature 002 routes the field, **Then** VLM is **skipped** and `RecognitionResult.content_text=None`, `inference_time_ms=0`.
+2. **Given** `aip_result.has_content=True`, **When** Feature 002 routes the field, **Then** VLM runs and `content_text` is populated (subject to its own cleanup rules).
+3. **Given** AIP raises an exception (e.g. corrupt blank ROI), **When** the failure is caught, **Then** `RecognitionResult.has_content=None` (AIP unavailable) and VLM still runs because the falsy-skip predicate is `has_content is False`, not "not True".
 
 ---
 
-### User Story 5 - Color-Coded Visualization with Preprocessing Results (Priority: P2)
+### User Story 4 — Configurable Blank-ROI Generation (Priority: P1)
 
-The system generates visualization images with ROI bounding boxes colored based on preprocessing has_content values (green for True, red for False). This provides visual quick-scan of document completion status based on the preprocessing pipeline's deterministic pixel analysis.
+`update_configs.py` produces the blank reference ROIs from `templates/images/<id>.jpg` using LabelMe ROI coordinates. Re-running it after annotation changes must regenerate every blank ROI under `data/<id>/blank_rois/`.
 
-**Why this priority**: User experience enhancement. Visual feedback allows rapid batch validation and debugging, with preprocessing results being more trustworthy for visual inspection than VLM text descriptions.
-
-**Independent Test**: Process a document and verify that visualization image shows green boxes around filled fields (preprocessing detected content) and red boxes around empty fields (preprocessing detected no content), with labels indicating preprocessing source.
+**Independent Test**: Run `python update_configs.py`, then run the pipeline. Inspect `data/<id>/blank_rois/<field>.png` and confirm it shows the **pre-printed** form region for that field (no user content, since the source is the clean golden template).
 
 **Acceptance Scenarios**:
 
-1. **Given** a document with 10 completed fields and 3 empty fields, **When** visualization is generated, **Then** 10 ROI boxes are drawn in green (preprocessing has_content=True) and 3 boxes in red (preprocessing has_content=False).
-
-2. **Given** a field where preprocessing failed to run (error case), **When** visualization renders, **Then** the ROI box defaults to neutral color (blue) to indicate uncertainty, with error logged.
-
-3. **Given** a title field that has no preprocessing, **When** visualization is drawn, **Then** the title ROI box uses original template color since it's not subject to validation.
+1. **Given** a fresh template image + LabelMe annotation, **When** `update_configs.py` runs, **Then** `data/<id>/blank_rois/<field>.png` exists for every non-title ROI.
+2. **Given** updated LabelMe coordinates, **When** `update_configs.py` re-runs, **Then** existing blank PNGs are overwritten.
+3. **Given** a blank ROI file is missing at pipeline start time, **When** `BlankTemplateROICache.load_blank_rois()` runs, **Then** the missing entry is logged and the cache still loads the others.
 
 ---
 
-### User Story 6 - Checkbox Recognition Preservation (Priority: P1)
+### User Story 5 — Inspectable Diff Images (Priority: P2)
 
-VX1 and VX2 checkbox fields continue using the existing heuristic pixel check method without preprocessing pipeline application, as the current pixel counting approach already provides reliable checkbox detection and preprocessing would add unnecessary complexity.
+For debugging false positives/negatives, the `processed_image` (the grayscale diff after ECC alignment) is bundled into the `RecognitionResult` and saved by Feature 002 as `processed_rois/<base>_roi_<field>_processed.png`.
 
-**Why this priority**: Regression prevention. Checkbox recognition works well with existing heuristic; preprocessing pipeline is designed for signature/stamp/text fields with more complex content patterns.
-
-**Independent Test**: Process documents with checked/unchecked VX1 and VX2 boxes, verify that recognition results match existing behavior (heuristic pixel counting), preprocessing pipeline is skipped for checkboxes, and validation logic uses heuristic results for VX1/VX2.
+**Independent Test**: After a run, open any processed ROI PNG. A genuinely filled field should show bright pixels where user content existed; a genuinely empty field should be near-black overall.
 
 **Acceptance Scenarios**:
 
-1. **Given** a document with VX1 checkbox checked, **When** recognition runs, **Then** existing heuristic detects checkmark, preprocessing pipeline is skipped, and VX1.has_content is True from heuristic.
-
-2. **Given** a document with VX2 checkbox unchecked, **When** recognition executes, **Then** heuristic returns False, preprocessing is bypassed, and VX2.has_content is False.
-
-3. **Given** checkbox results, **When** validation logic runs, **Then** VX1 and VX2 use heuristic has_content values rather than preprocessing has_content.
+1. **Given** any non-title field after a successful run, **When** the user opens `processed_rois/<base>_roi_<field>_processed.png`, **Then** they see the grayscale BGR-mean-diff image.
+2. **Given** `DEBUG_ROI_PREPROCESSING=true` is set in the environment, **When** the pipeline runs, **Then** additional intermediates (`00_aligned_doc.png`, `01_diff_gray.png`, `02_final.png`) and a `metadata.json` (with `decision_reasoning`) are saved under `output/processed_rois/<document_name>/<field_id>/`.
+3. **Given** `DEBUG_ROI_PREPROCESSING` is unset (default), **When** the pipeline runs, **Then** only the per-field final PNG is saved (no intermediates).
 
 ---
 
-### User Story 7 - Processed ROI Image Export (Priority: P2)
+### Edge Cases (Behaviour Today)
 
-The system saves intermediate and final preprocessing images for each ROI to output/processed_rois/{document_name}/{field_id}/ directory, including difference images, filtered images, and binary output images. This enables pipeline debugging, threshold tuning, and quality verification.
-
-**Why this priority**: Debugging and transparency. Users and developers can visually inspect each preprocessing step to understand why content was detected or missed, and tune thresholds for their specific form types.
-
-**Independent Test**: Process a document with preprocessing enabled, verify that output/processed_rois/ contains subdirectories for each document with step-by-step images for each field (01_grayscale.png, 02_difference.png, 03_morphology.png, 04_noise_removed.png, 05_binary.png).
-
-**Acceptance Scenarios**:
-
-1. **Given** a document with 13 ROI fields, **When** preprocessing completes, **Then** output directory contains 13 subdirectories with 5+ intermediate images each showing preprocessing stages.
-
-2. **Given** a field where preprocessing detected content, **When** inspecting saved images, **Then** difference image shows clear content regions, morphology image shows line removal, and binary image shows final detected content blobs.
-
-3. **Given** a field where preprocessing failed to detect faint content, **When** reviewing saved images, **Then** user can identify which step lost the content (threshold too high, noise removal too aggressive, etc.) and adjust config parameters.
+| Scenario | Current Behaviour |
+|---|---|
+| Blank ROI image missing for the matched template | AIP is skipped for that field; `aip_result is None`; `has_content` is `None`; VLM still runs. |
+| Doc ROI is heavily skewed within the bounding box | ECC `MOTION_EUCLIDEAN` (translation + rotation, 4 DoF) corrects small misalignment; severe skew makes ECC fail → falls back to unaligned diff (still usable in most cases). |
+| Doc ROI has very different content than template (e.g. wrong document type slipped through Feature 001) | `mean_diff` will be very high; the `mean_diff > 0.15` branch fires; `significant_ratio` is computed but unreliable since the entire ROI is "different". Feature 001 should have caught this earlier with low inliers. |
+| User content with low contrast (faint pencil) | Mean diff may be just above 0.01 → `has_content=True` (correct). Very faint content (mean diff < 0.005) is missed (acceptable for production use case). |
+| BGR colour channels saturated by JPEG compression | No special handling; BGR mean diff smooths over channel-specific noise. |
 
 ---
-
-### Edge Cases
-
-- **Blank template quality variations**: What happens when the blank template has slight printing defects or quality variations? The template difference step may produce false positives; solution is to use multiple blank template samples and combine their difference results with OR logic.
-
-- **Partial content filling**: How does system handle very light signatures or extremely faint stamps? HSV saturation channel preprocessing helps preserve faint colors; threshold tuning (DIFFERENCE_THRESHOLD, INK_RATIO_THRESHOLD) can be adjusted based on test results.
-
-- **Template alignment errors**: What happens when document alignment fails and ROI positions are incorrect? Template difference will fail to cancel out pre-printed content (wrong regions compared); system should detect high difference scores even in "blank" fields and log alignment warning.
-
-- **Rotated or skewed signatures**: How does preprocessing handle rotated signatures within aligned ROIs? Morphological operations use multiple kernel orientations to avoid removing rotated strokes; connected components analysis is rotation-invariant.
-
-- **Overlapping content**: What happens when a stamp overlaps pre-printed text? Template difference preserves the stamp overlay while removing base text; the overlapping region appears as added content (correct behavior).
-
-- **Color stamps on color forms**: How does system differentiate color stamps from color-printed form elements? Saturation channel analysis in HSV space detects stamp saturation differences; template difference in grayscale catches intensity changes.
-
-- **Multi-page PDFs with mixed templates**: How does system select correct blank template ROI for each page? Match based on template_id from alignment phase; each page's ROIs compare against its matched template's blank ROIs.
-
-- **Missing blank template ROIs**: How does system behave if blank ROI images are not found for a template? Log warning, skip preprocessing for that template, fall back to VLM-only recognition to maintain functionality.
 
 ## Requirements *(mandatory)*
 
 ### Functional Requirements
 
-- **FR-001**: System MUST extend update_configs.py to extract blank template ROI images from template source images using configured ROI coordinates, saving ROI images to data/{template_id}/blank_rois/{field_id}.png for each field.
+- **FR-001**: `update_configs.py` MUST extract blank reference ROI images from `templates/images/<template_id>.jpg` using the bounding boxes in `templates/location/<template_id>.json` (LabelMe), saving each to `data/<template_id>/blank_rois/<field_id>.png`. Title fields and version fields do **not** require blank ROIs (they bypass AIP).
+- **FR-002**: `BlankTemplateROICache.load_blank_rois(template_id, templates_dir)` MUST load every PNG in `data/<template_id>/blank_rois/` into memory at pipeline startup. The cache MUST report the count of loaded blanks. Missing files are logged but do not abort startup.
+- **FR-003**: `ROIPreprocessor.preprocess_roi(doc_roi, blank_template_roi, field_id, document_name)` MUST execute the following pipeline in order:
+  1. Validate that both inputs are `uint8` 3-channel BGR ndarrays. Raise `ValueError` otherwise.
+  2. If shapes differ, log a warning when the relative difference exceeds 10%, then resize doc ROI to template shape using `cv2.resize` with `INTER_LINEAR` (default).
+  3. ECC align doc ROI to template ROI using grayscale conversion, `cv2.MOTION_EUCLIDEAN`, termination criteria `(TERM_CRITERIA_EPS | TERM_CRITERIA_COUNT, 50, 0.001)`, `gaussFiltSize=1`. On `cv2.error`, log and use the original ROI.
+  4. Cast both ROIs to `float32` and compute `abs_diff = np.abs(doc_float - template_float)`.
+  5. Reduce to grayscale with `diff_gray = mean(abs_diff, axis=2).astype(uint8)`.
+  6. Compute `mean_diff = mean(diff_gray) / 255.0`.
+  7. Compute `significant_diff = diff_gray[diff_gray > 30]` and `significant_ratio = len(significant_diff) / diff_gray.size`.
+  8. Decision: `has_content = significant_ratio > 0.20` if `mean_diff > 0.15`, else `has_content = mean_diff > 0.01`.
+  9. Return an `AIPResult` with `has_content`, `ink_ratio=mean_diff`, `component_count=None`, `processing_time_ms`, `processed_image=diff_gray`.
+- **FR-004**: AIP MUST be invoked **only** for fields where `field_type` is not `"title"` and not `"version"`. Title fields skip AIP entirely (`has_content` stays `None`); version fields skip AIP and have `has_content` hard-coded to `True` by Feature 002.
+- **FR-005**: When the blank ROI is unavailable for a given `(template_id, field_id)` pair, AIP MUST be skipped silently for that field; `RecognitionResult.has_content = None`. Feature 002 then runs VLM unconditionally for that field.
+- **FR-006**: AIP MUST handle its own exceptions and return an `AIPResult` with `has_content=None`, `ink_ratio=None`, `component_count=None`, `error_message=str(e)` rather than propagating. The pipeline continues with the next field.
+- **FR-007**: Per-field debug images MUST be saved **only when** the environment variable `DEBUG_ROI_PREPROCESSING=true` is set (see `vlm_recognizer.py:DEBUG_SAVE_INTERMEDIATE_IMAGES`). When saved, they go to `output/processed_rois/<document_name>/<field_id>/`:
+  - `00_aligned_doc.png` — doc ROI after ECC alignment.
+  - `01_diff_gray.png` — grayscale BGR mean-diff image.
+  - `02_final.png` — same as `01_diff_gray.png` (kept for compatibility / future expansion).
+  - `metadata.json` — includes `has_content`, `ink_ratio`, `component_count`, `processing_time_ms`, `thresholds_used.MIN_ABSOLUTE_DENSITY_THRESHOLD`, `decision_reasoning`, `error_message`.
+- **FR-008**: The **default (production) save behaviour** is handled by Feature 002 via `save_preprocessed_rois`: one PNG per ROI at `output/<date>/<case_id>/processed_rois/<base>_roi_<field>_processed.png`. This is independent of the debug flag.
+- **FR-009**: `ROIPreprocessor` MUST NOT cache state between calls; the same instance can be reused across documents but is **not thread-safe** (the underlying ECC buffers are reused). For parallel processing, create one instance per thread.
+- **FR-010**: Production thresholds (`MIN_ABSOLUTE_DENSITY_THRESHOLD = 0.01`, `significant_threshold = 30`, `mean_diff > 0.15` branch, `significant_ratio > 0.20`) MUST be module-level constants in `roi_preprocessor.py`. Any change to these constants is a behaviour change and MUST update this spec.
 
-- **FR-002**: System MUST implement a 6-step ROI preprocessing pipeline for content detection:
-  - Step 1 (Preprocessing): Convert ROI to HSV color space, extract saturation channel to preserve faint color stamps, return single-channel image for subsequent processing
-  - Step 2 (Template Difference): Convert both sample and template ROIs to grayscale, compute absolute difference, apply binary threshold to isolate added content, produce binary difference image
-  - Step 3 (Structural Filtering): Apply morphological opening with horizontal kernel (width = ROI_width * 0.3, height = 3) to remove horizontal lines, apply morphological opening with vertical kernel (width = 3, height = ROI_height * 0.3) to remove vertical lines, preserve signatures/stamps (irregular shapes not affected by line-oriented kernels)
-  - Step 4 (Noise Removal): Apply morphological opening with small kernel (3x3) to remove salt-and-pepper noise, apply connected components analysis to remove blobs smaller than MIN_BLOB_AREA (configurable, default 20 pixels)
-  - Step 5 (Feature Extraction): Calculate ink_ratio = non-zero_pixels / total_pixels, count connected components with area > MIN_BLOB_AREA, return (ink_ratio, component_count)
-  - Step 6 (Decision Logic): has_content = True if (ink_ratio > INK_RATIO_THRESHOLD AND component_count >= COMPONENT_COUNT_THRESHOLD), else has_content = False
+### Key Entities
 
-- **FR-003**: System MUST make preprocessing threshold parameters configurable via vlm_pdf_recognizer/recognition/config.py:
-  - DIFFERENCE_THRESHOLD: Threshold for template difference binarization (default 25, range 10-50)
-  - INK_RATIO_THRESHOLD: Minimum ink ratio to consider content present (default 0.005 = 0.5%, range 0.001-0.02)
-  - COMPONENT_COUNT_THRESHOLD: Minimum connected components for content (default 3, range 1-10)
-  - MIN_BLOB_AREA: Minimum pixel area for valid component (default 20, range 5-100)
-  - MORPHOLOGY_LINE_RATIO: Ratio of ROI dimension for line removal kernels (default 0.3, range 0.2-0.5)
+See [data-model.md](./data-model.md) for full schemas.
 
-- **FR-004**: System MUST apply preprocessing pipeline to all non-title, non-checkbox fields (text, number, stamp fields) during VLM recognition workflow, before VLM inference is invoked.
+| Entity | Module | Role |
+|---|---|---|
+| `BlankTemplateROICache` | `alignment/blank_template_roi_cache.py` | Loads + stores blank reference ROI images in memory; queried via `get_blank_roi(template_id, field_id)`. |
+| `ROIPreprocessor` | `recognition/roi_preprocessor.py` | Executes the ECC + BGR-diff pipeline; returns `AIPResult`. |
+| `AIPResult` | same | Output dataclass: `has_content`, `ink_ratio` (= `mean_diff`), `processing_time_ms`, `processed_image`, `error_message`. |
+| `DEBUG_SAVE_INTERMEDIATE_IMAGES` (env-driven flag) | `vlm_recognizer.py` | When True, AIP saves intermediates + metadata.json under `output/processed_rois/`. |
+| `update_configs.py` (top-level script) | repo root | Generates `data/<id>/blank_rois/<field>.png` from LabelMe annotations. |
 
-- **FR-005**: System MUST skip preprocessing pipeline for title fields (no validation needed) and checkbox fields (existing heuristic is sufficient), setting preprocessing has_content to None for these field types.
-
-- **FR-006**: System MUST always invoke VLM inference for all non-title fields regardless of preprocessing result, to extract content_text even when preprocessing determines has_content=False (for debugging and comparison purposes).
-
-- **FR-007**: System MUST store both preprocessing has_content and VLM has_content values in RecognitionResult dataclass:
-  - Add preprocessing_has_content field (True/False/None)
-  - Add preprocessing_metrics field containing (ink_ratio, component_count, processing_time_ms)
-  - Preserve existing VLM has_content and auxiliary_has_content fields for backward compatibility
-
-- **FR-008**: System MUST update DocumentRecognitionOutput.calculate_results_status() to use preprocessing_has_content as primary input for validation logic (instead of auxiliary_has_content or VLM has_content), applying existing rules:
-  - VX1 priority: If VX1.has_content is True (using heuristic, not preprocessing), results = False
-  - Date fields OR: At least one of (year, month, date) must have preprocessing_has_content=True
-  - Other fields AND: All non-title, non-date fields must have preprocessing_has_content=True (VX2 included with heuristic result, VX1 excluded)
-  - Final results = date_valid AND other_fields_valid
-
-- **FR-009**: System MUST update output schema to include preprocessing results:
-  - JSON output: Add preprocessing_has_content and preprocessing_metrics to each field_result object
-  - CSV output: Add preprocessing_{field_id}_has_content column for each field
-  - Maintain existing VLM_has_content and AUX_has_content columns for comparison
-
-- **FR-010**: System MUST update save_vlm_visualization() to use preprocessing_has_content for ROI box coloring:
-  - Title fields: Original template color
-  - Checkbox fields (VX1, VX2): Color based on heuristic has_content (green=True, red=False)
-  - Other fields: Green (0,255,0) if preprocessing_has_content=True, Red (0,0,255) if preprocessing_has_content=False, Blue (255,0,0) if preprocessing_has_content=None (error/skip)
-  - Label format: "{field_id}: {preprocessing_has_content}" or "{field_id}: ERROR" for preprocessing failures
-
-- **FR-011**: System MUST save intermediate preprocessing images for debugging:
-  - Create output/processed_rois/{document_name}/{field_id}/ subdirectory for each field
-  - Save: 01_saturation.png (HSV saturation channel), 02_difference.png (template difference binary), 03_hline_removed.png (after horizontal line removal), 04_vline_removed.png (after vertical line removal), 05_noise_removed.png (after noise filtering), 06_final_binary.png (final binary image for decision)
-  - Include metadata.json with preprocessing metrics (ink_ratio, component_count, has_content, thresholds used)
-
-- **FR-012**: System MUST handle missing blank template ROIs gracefully:
-  - If blank ROI image file does not exist for a field, log warning and skip preprocessing for that field
-  - Fall back to VLM-only recognition (existing behavior) to maintain functionality
-  - Set preprocessing_has_content to None to indicate preprocessing was skipped
-
-- **FR-013**: System MUST implement error handling for preprocessing failures:
-  - Catch image loading errors (corrupt blank template ROI)
-  - Catch preprocessing errors (dimension mismatch, color space conversion failure)
-  - On error: Log error with field_id and exception, set preprocessing_has_content to None, continue with VLM inference
-  - Do not halt document pipeline on preprocessing failure
-
-- **FR-014**: System MUST preserve all existing functionality when preprocessing is disabled or unavailable:
-  - VLM inference runs for all fields as before
-  - Existing auxiliary comparison (SIFT-based) continues to work if available
-  - Checkbox heuristic recognition continues unchanged
-  - Template matching and ROI extraction operate identically
-
-- **FR-015**: System MUST log preprocessing metrics for each field for threshold tuning:
-  - Log ink_ratio, component_count, and final has_content decision
-  - Log reasoning: "ink_ratio=0.012 > threshold=0.005 AND component_count=5 >= threshold=3, has_content=True"
-  - Include summary statistics in processing logs: "Preprocessing: 12/13 fields processed, 8 detected filled, 4 detected empty, 1 skipped"
-
-- **FR-016**: System MUST resize sample ROI to match blank template ROI dimensions before preprocessing if sizes differ:
-  - Use OpenCV resize with INTER_LINEAR interpolation
-  - Preserve aspect ratio by padding with white pixels if necessary
-  - Log warning if significant size mismatch (>10% difference)
-
-### Key Entities *(include if feature involves data)*
-
-- **BlankTemplateROI**: Represents a blank template ROI image extracted during configuration, stored at data/{template_id}/blank_rois/{field_id}.png, used as reference baseline for template difference preprocessing.
-
-- **ROIPreprocessor**: Component responsible for executing the 6-step preprocessing pipeline on document ROI images, comparing against blank template ROIs, and producing has_content determination with explainable metrics.
-
-- **PreprocessingResult**: Data structure containing preprocessing output for a single ROI field, including has_content decision, ink_ratio metric, component_count metric, processing_time_ms, and error information if preprocessing failed.
-
-- **PreprocessingConfig**: Configuration parameters for the preprocessing pipeline, including all threshold values (DIFFERENCE_THRESHOLD, INK_RATIO_THRESHOLD, COMPONENT_COUNT_THRESHOLD, MIN_BLOB_AREA, MORPHOLOGY_LINE_RATIO), loaded from config.py.
+---
 
 ## Success Criteria *(mandatory)*
 
-### Measurable Outcomes
+Measured on RTX 4080 Laptop / Ubuntu:
 
-- **SC-001**: Preprocessing pipeline achieves at least 98% accuracy on test documents with clear filled/unfilled fields (signature boxes, stamp areas), compared to ground truth manual labeling.
+- **SC-001**: AIP per-ROI latency is **10–30 ms** (dominated by ECC).
+- **SC-002**: AIP correctly classifies **unambiguous** filled vs empty fields (clear handwriting / no handwriting; stamped / not stamped) with high accuracy on the production document set. There is no formal benchmark in `tests/`; accuracy is monitored qualitatively via `result_log.md` failures.
+- **SC-003**: Skipping VLM on AIP-empty fields measurably reduces per-document time (verifiable by comparing total VLM time before/after disabling AIP — disabling is **not** a supported config; this is purely observational).
+- **SC-004**: When `DEBUG_ROI_PREPROCESSING=true`, every non-title field gets a 3-image debug bundle plus `metadata.json` with the decision reasoning string.
+- **SC-005**: Pipeline never crashes due to AIP failures — failures are caught, logged, and converted to `has_content=None`.
 
-- **SC-002**: Preprocessing pipeline correctly detects faint red stamps with saturation as low as 30% (HSV S channel value 77/255), where pure grayscale approaches would fail.
-
-- **SC-003**: Preprocessing completes in under 100ms per ROI on standard hardware (CPU-based OpenCV operations), adding minimal overhead compared to VLM inference time (typically 500-2000ms per ROI).
-
-- **SC-004**: Document validation using preprocessing_has_content achieves at least 95% agreement with ground truth on test document set, matching or exceeding previous auxiliary comparison validation accuracy.
-
-- **SC-005**: Saved preprocessing images enable users to debug false negatives or false positives by visually inspecting the 6-step pipeline output, with at least 80% of detection errors being explainable from the saved images.
-
-- **SC-006**: Configuration script successfully generates blank template ROIs for all three templates (contractor_1, contractor_2, enterprise_1) in under 10 seconds, producing valid PNG files under 100KB per ROI.
-
-- **SC-007**: Zero regression - all existing VLM recognition, output formats, checkbox detection, and auxiliary comparison features continue to function identically when preprocessing is available or unavailable.
+---
 
 ## Assumptions
 
-1. Blank template images provided in templates/ directory are clean scans without handwritten annotations or pre-filled content - if blank templates contain user content, template difference will incorrectly cancel out that content in sample documents.
+1. **Blank template golden image is clean** — no annotations, no handwriting. AIP cannot distinguish "pre-existing handwriting on template" from "user content".
+2. **Homography from Feature 001 is approximately correct** — ECC corrects sub-pixel drift, not global misalignment. If the homography is fundamentally wrong (e.g. wrong template selected), AIP results are meaningless.
+3. **`MIN_ABSOLUTE_DENSITY_THRESHOLD = 0.01` is calibrated for the current document set.** Other document types may need re-tuning.
+4. **The `mean_diff > 0.15` branch targets fields with pre-printed placeholder text** like stamp boxes (`負責人蓋章處`). On such fields, residual text after ECC alignment can elevate the mean diff; only a high fraction of significant pixels (≥ 20%) indicates real content.
+5. **`update_configs.py` is run after every template / annotation change.** Stale blank ROIs will silently produce wrong `has_content` decisions.
 
-2. Template difference preprocessing provides sufficient discrimination for typical form fields - if form design has complex overlapping patterns or textures, additional preprocessing steps (edge detection, frequency analysis) may be needed.
-
-3. Template alignment quality is consistent between blank template ROI extraction and document ROI extraction - if alignment accuracy varies, ROI positions may not correspond correctly for template difference.
-
-4. Preprocessing threshold parameters can be globally configured or tuned per-template - initial implementation uses single global thresholds, with future refinement allowing per-field-type or per-template thresholds.
-
-5. Users will re-run update_configs.py whenever template definitions or ROI coordinates change - the system does not auto-detect stale blank template ROIs.
-
-6. Preprocessing is intended for content presence detection (has_content), not content extraction - VLM handles text/number extraction, preprocessing provides binary filled/unfilled signal.
-
-7. OpenCV morphological operations and connected components analysis are sufficient for detecting typical signature/stamp patterns - extremely unusual content patterns (single-pixel dots, very sparse content) may require custom detection logic.
-
-8. Processing performance overhead from saving intermediate images is acceptable (estimated 20-30ms per field for 6 PNG file writes) given debugging value.
-
-## Dependencies
-
-- **OpenCV Python (cv2)**: Required for HSV color space conversion, morphological operations, connected components analysis, and template difference computation.
-
-- **Blank Template Images**: Requires clean blank template source images in templates/ directory matching the configurations used for document alignment.
-
-- **Configuration Script**: Depends on update_configs.py having access to template source images and ROI coordinate definitions from templates/location/{template_id}.json.
-
-- **Existing ROI Extraction Pipeline**: Preprocessing pipeline assumes ROIs are already extracted via template matching and geometric correction, receiving aligned ROI images as input.
-
-- **NumPy**: Required for pixel array operations, ratio calculations, and image manipulation.
+---
 
 ## Out of Scope
 
-- **Adaptive threshold tuning**: The preprocessing threshold parameters are manually configured; automatic threshold optimization based on document batch statistics is not included in this feature.
+- HSV / saturation channel preprocessing (was in the draft; not adopted).
+- Morphological line removal (horizontal/vertical kernels) — not adopted.
+- Connected-component analysis with `MIN_BLOB_AREA` threshold — not adopted (`component_count` field stays `None`).
+- Per-field-type threshold tuning — single global thresholds only.
+- Adaptive / learned thresholds — manual configuration only.
+- AIP on checkbox fields — checkboxes use the AIP pipeline too (they are non-title, non-version), just the same path as other fields; the draft's "checkboxes need a separate heuristic" is no longer true.
+- AIP on title fields — title fields bypass the entire recognition stack (`predefined_value` is returned).
+- Real-time / streaming AIP.
+- GPU acceleration of the AIP pipeline (currently CPU OpenCV; latency is fine).
 
-- **Machine learning-based content detection**: The preprocessing pipeline uses rule-based computer vision techniques; training a classifier on filled/unfilled ROI examples is not included.
+---
 
-- **Sub-ROI analysis**: The system analyzes entire ROI regions; detecting partial filling or analyzing specific sub-regions within an ROI (e.g., signature in top-left corner only) is not supported.
+## Dependencies
 
-- **Temporal blank template updates**: If template designs change over time (new printing format), managing multiple versions of blank template ROIs per template is not handled.
+- **OpenCV ≥ 4.8** — `cvtColor`, `findTransformECC`, `warpAffine`, `imencode`, `resize`.
+- **NumPy** — pixel arithmetic.
+- **Feature 001** — provides aligned ROIs and the matched template ID.
+- **Feature 002** (`vlm_recognizer.py`) — invokes AIP via `_recognize_field`, consumes `AIPResult.has_content`.
+- **`update_configs.py`** — produces blank ROI PNGs that AIP relies on.
 
-- **Real-time preprocessing parameter adjustment**: Users must edit config.py and restart the application to change thresholds; live parameter tuning via UI is not provided.
+---
 
-- **Multi-sample blank template fusion**: If multiple blank template samples exist (different printing batches), averaging or merging them into a single reference is not implemented - only single blank ROI per field.
+## Notes for Spec-vs-Code Reviewers
 
-- **Preprocessing for checkbox fields**: Checkboxes continue using existing heuristic method; applying the 6-step preprocessing pipeline to checkboxes is explicitly out of scope to avoid regression.
-
-- **Color-based stamp detection**: While HSV saturation helps preserve faint stamps, dedicated red/blue stamp detection using color thresholding is not implemented - preprocessing relies on template difference to isolate stamps.
+- The `AIPResult.component_count` field is **vestigial** — kept in the dataclass for backwards binary compatibility with old JSON outputs, always `None`. Do not add new logic that reads it.
+- The `processed_image` returned in `AIPResult` is the grayscale diff (`diff_gray`), not a binarised mask. The output PNG is therefore continuous-tone — bright where content was detected.
+- ECC failure is **not** a fatal error — code logs at DEBUG level and continues with the unaligned ROI. If your debug logs are at INFO level you will miss these. Bump to DEBUG when investigating odd `has_content` outcomes.
+- The `mean_diff > 0.15` constant was empirically chosen against the production stamp / signature templates. Treat it as a tuning knob, not a universal threshold.

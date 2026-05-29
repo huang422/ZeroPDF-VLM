@@ -1,7 +1,13 @@
-# Tasks: VLM-Assisted ROI Content Detection with Image Preprocessing
+# Tasks: AIP — ROI Content Detection
 
 **Input**: Design documents from `/specs/004-vlm-roi-preprocessing/`
 **Prerequisites**: plan.md, spec.md, research.md, data-model.md, contracts/, quickstart.md
+**Last Aligned With Code**: 2026-05-26
+**Status**: ✅ ALL TASKS COMPLETED — production AIP lives at `vlm_pdf_recognizer/recognition/roi_preprocessor.py` and `vlm_pdf_recognizer/alignment/blank_template_roi_cache.py`.
+
+> **Note for current contributors**: do not append new tasks here. Follow the workflow in [DEVELOPMENT_WORKFLOW.md](../../DEVELOPMENT_WORKFLOW.md).
+>
+> **Drift from this task list**: Tasks describing the **6-step HSV/morphology/connected-components pipeline** are superseded. Production uses ECC + BGR mean-diff + 2-tier threshold. See `spec.md` "Drift from the original draft" and `research.md` Section 0.
 
 **Tests**: Not explicitly requested in specification - focusing on implementation and manual validation
 

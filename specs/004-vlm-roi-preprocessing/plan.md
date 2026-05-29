@@ -1,150 +1,100 @@
-# Implementation Plan: VLM-Assisted ROI Content Detection with Image Preprocessing
+# Implementation Plan: AIP — ROI Content Detection
 
 **Branch**: `004-vlm-roi-preprocessing` | **Date**: 2025-12-31 | **Spec**: [spec.md](spec.md)
-**Input**: Feature specification from `/specs/004-vlm-roi-preprocessing/spec.md`
-
-**Note**: This template is filled in by the `/speckit.plan` command. See `.specify/templates/commands/plan.md` for the execution workflow.
+**Last Aligned With Code**: 2026-05-26
+**Status**: Implemented. This plan documents the production AIP pipeline (replacing the original 6-step draft with the simpler ECC + BGR-diff design).
 
 ## Summary
 
-Implement a 6-step image preprocessing pipeline for ROI content detection that compares extracted document ROIs against blank template ROIs using template difference, morphological operations, and connected components analysis. The pipeline provides deterministic has_content detection (True/False) for signature boxes, stamp areas, and text fields, replacing the previous SIFT feature matching approach with more reliable pixel-based analysis. Preprocessing results are used as primary input for document validation logic while maintaining full VLM integration for content extraction.
+Provide a deterministic, pixel-based `has_content` detector for non-title fields, so that Feature 002 (VLM recognition) can skip clearly-empty ROIs and rely on AIP — not the VLM — for the boolean fed into validation logic.
+
+Production pipeline per ROI:
+
+1. Validate inputs (uint8 BGR, 3-channel).
+2. Resize doc ROI to template shape if dimensions differ (warn at > 10%).
+3. ECC sub-pixel alignment (MOTION_EUCLIDEAN) — corrects residual local drift after Feature 001's global homography.
+4. BGR absolute difference between aligned doc ROI and blank template ROI.
+5. Reduce to grayscale via mean-across-channels → `diff_gray`.
+6. Two-tier threshold:
+   - **Normal branch**: `mean_diff > 0.01` ⇒ `has_content=True`.
+   - **Pre-printed-text branch**: if `mean_diff > 0.15`, require `significant_ratio > 0.20` (≥ 20% of pixels above per-pixel threshold of 30/255).
+
+`has_content` from AIP drives both per-document validation (`calculate_results_status` in Feature 002) and the visualisation colour code.
 
 ## Technical Context
 
-**Language/Version**: Python 3.9+ (existing vlmcv environment)
-**Primary Dependencies**:
-- OpenCV (cv2) 4.x - Image preprocessing, morphological operations, connected components
-- NumPy - Array operations and pixel calculations
-- PyTorch 2.0+ - Existing VLM model execution
-- Transformers 4.52.1+ (HuggingFace) - Existing VLM infrastructure
-- Pillow (PIL) - Existing image format conversion
-
-**Storage**: File-based
-- Blank template ROIs: data/{template_id}/blank_rois/{field_id}.png
-- Processed ROI debug images: output/processed_rois/{document_name}/{field_id}/
-- Configuration: vlm_pdf_recognizer/recognition/config.py (Python module)
-- Output: JSON and CSV files in output/ directory
-
-**Testing**: pytest (existing test infrastructure)
-- Unit tests: tests/unit/test_roi_preprocessor.py (new)
-- Integration tests: tests/integration/test_preprocessing_pipeline.py (new)
-- Existing tests: Ensure zero regression on VLM, checkbox, template matching
-
-**Target Platform**: Linux (primary), cross-platform Python
-**Project Type**: Single Python application with CLI interface (main.py)
-
-**Performance Goals**:
-- Preprocessing pipeline: <100ms per ROI (CPU-based OpenCV)
-- Total overhead: <10-20% increase to existing pipeline time
-- Blank ROI generation: <10 seconds for all templates
-
-**Constraints**:
-- Must preserve all existing functionality (zero regression)
-- Must integrate with existing VLM pipeline without breaking backward compatibility
-- Must save intermediate images for debugging without significant performance impact
-- Configurable thresholds via config.py (no hardcoded values)
-
-**Scale/Scope**:
-- 3 templates (contractor_1, contractor_2, enterprise_1)
-- 13-14 ROI fields per template
-- Batch processing of multiple documents
-- 6 intermediate images per ROI per document (for debugging)
-
-## Project Structure
-
-### Documentation (this feature)
-
-```text
-specs/[###-feature]/
-├── plan.md              # This file (/speckit.plan command output)
-├── research.md          # Phase 0 output (/speckit.plan command)
-├── data-model.md        # Phase 1 output (/speckit.plan command)
-├── quickstart.md        # Phase 1 output (/speckit.plan command)
-├── contracts/           # Phase 1 output (/speckit.plan command)
-└── tasks.md             # Phase 2 output (/speckit.tasks command - NOT created by /speckit.plan)
-```
-
-### Source Code (repository root)
-
-```text
-vlm_pdf_recognizer/
-├── preprocessing/           # Existing module
-│   └── pdf_converter.py
-├── alignment/              # Existing module (template matching, ROI extraction)
-│   ├── feature_extractor.py
-│   ├── template_matcher.py
-│   ├── geometric_corrector.py
-│   ├── blank_roi_cache.py
-│   └── roi_comparator.py   # MODIFIED: Remove SIFT comparison logic
-├── extraction/             # Existing module
-│   └── roi_extractor.py
-├── recognition/            # Existing module - MAJOR MODIFICATIONS
-│   ├── __init__.py
-│   ├── config.py          # MODIFIED: Add preprocessing thresholds
-│   ├── field_schema.py    # Existing
-│   ├── vlm_loader.py      # Existing
-│   ├── vlm_recognizer.py  # MODIFIED: Integrate preprocessing pipeline
-│   └── roi_preprocessor.py # NEW: 6-step preprocessing pipeline
-├── templates/             # Existing module
-│   ├── template_cache.py
-│   └── template_loader.py
-├── pipeline.py            # MODIFIED: Load blank template ROI cache
-└── output.py              # MODIFIED: Export preprocessing results
-
-data/
-├── {template_id}/
-│   ├── blank_rois/        # NEW: Blank template ROI images
-│   │   ├── {field_id}.png
-│   │   └── ...
-│   ├── template.png       # Existing
-│   └── config.json        # Existing
-
-output/
-├── processed_rois/        # NEW: Preprocessing debug images
-│   └── {document_name}/
-│       └── {field_id}/
-│           ├── 01_saturation.png
-│           ├── 02_difference.png
-│           ├── 03_hline_removed.png
-│           ├── 04_vline_removed.png
-│           ├── 05_noise_removed.png
-│           ├── 06_final_binary.png
-│           └── metadata.json
-├── VLM_results.json       # MODIFIED: Add preprocessing columns
-└── vlm_recognition_results.csv  # MODIFIED: Add preprocessing columns
-
-tests/
-├── unit/
-│   ├── test_roi_preprocessor.py  # NEW: Unit tests for preprocessing
-│   ├── test_vlm_recognizer.py   # MODIFIED: Update for preprocessing
-│   └── ...
-└── integration/
-    ├── test_preprocessing_pipeline.py  # NEW: End-to-end tests
-    └── ...
-
-update_configs.py          # MODIFIED: Generate blank template ROIs
-main.py                    # Existing (no changes needed)
-```
-
-**Structure Decision**: Single Python application structure (Option 1). The feature integrates into the existing vlm_pdf_recognizer package by:
-1. Adding new roi_preprocessor.py module for the 6-step pipeline
-2. Modifying vlm_recognizer.py to call preprocessing before VLM inference
-3. Extending update_configs.py to generate blank template ROI images
-4. Updating config.py with new preprocessing threshold parameters
-5. Modifying output.py to export preprocessing results alongside VLM results
+| Item | Value |
+|---|---|
+| Language | Python 3.9+ |
+| Image processing | OpenCV (cvtColor, findTransformECC, warpAffine, resize) |
+| Numerics | NumPy |
+| Hardware | CPU only — latency 10–30 ms / ROI |
+| Failure mode | All AIP exceptions caught and converted to `has_content=None` → VLM still runs |
+| Determinism | Fully deterministic given fixed thresholds and blank ROI files |
 
 ## Constitution Check
 
-*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
+- **Local-first**: ✅ CPU-only, no network calls.
+- **Zero training**: ✅ Pure image processing, no model.
+- **Determinism**: ✅ Same inputs always yield same `AIPResult`.
+- **Graceful degradation**: ✅ Failures yield `has_content=None`, pipeline continues.
+- **Explainability**: ✅ `decision_reasoning` string written to debug `metadata.json`.
 
-**Status**: ✅ PASS (No constitution file found - proceeding with feature implementation)
+## Major Pivots From the Original Draft
 
-**Notes**:
-- No `.specify/memory/constitution.md` constraints defined for this project
-- Following existing codebase patterns and architecture
-- Maintaining backward compatibility with all existing features
-- Zero regression requirement enforced via testing
+The first draft proposed a **6-step pipeline** with HSV preprocessing, morphological line removal, connected components, and 5 configurable thresholds. Production simplified to ECC align + BGR mean diff + 2-tier threshold. Reasons:
 
-## Complexity Tracking
+1. **HSV saturation channel** didn't help enough on the production document set — most fills are dark ink on white background, where BGR-mean-diff already discriminates well.
+2. **Morphological line removal** was sensitive to template-specific kernel sizing and could remove faint signatures.
+3. **Connected components** added latency (~ 5 ms / ROI) without measurable accuracy gain over the simpler thresholds.
+4. **Five configurable thresholds** became a maintenance burden — different templates wanted different values, leading to per-template tuning.
 
-*No violations - Constitution Check passed. This section is not applicable.*
+The `mean_diff > 0.15` branch was added as a special case for **fields with pre-printed placeholder text** (e.g. stamp boxes labelled `負責人蓋章處`). On those fields, even a perfectly-aligned blank-template diff shows residual text outline noise; using `significant_ratio` as the secondary gate makes the decision robust to that noise.
+
+The legacy `component_count` field is retained in `AIPResult` for backwards compatibility with debug tooling but is always `None`.
+
+## Project Structure
+
+```text
+vlm_pdf_recognizer/
+├── alignment/
+│   └── blank_template_roi_cache.py   # In-memory cache for blank ROI PNGs
+└── recognition/
+    └── roi_preprocessor.py            # ROIPreprocessor + AIPResult
+
+update_configs.py                      # Generates data/<id>/blank_rois/<field>.png
+data/<template_id>/blank_rois/         # Per-field blank reference PNGs
+```
+
+AIP is invoked by `VLMRecognizer._recognize_field` in `vlm_pdf_recognizer/recognition/vlm_recognizer.py` (see `vlm_recognizer.py:_recognize_field` Step 1 — AIP).
+
+## Complexity Notes
+
+- **One `ROIPreprocessor` per `_recognize_field` call.** Construction is cheap; the alternative (singleton) would complicate the debug-image save path.
+- **ECC `MOTION_EUCLIDEAN` (4 DoF)** chosen over `MOTION_TRANSLATION` because some scans introduce small rotational drift even after Feature 001's homography.
+- **Two-stage threshold is empirically tuned.** Changing either constant is a behaviour change — update the spec and run a representative batch.
+
+## Phase 0 — Research
+
+See [research.md](./research.md). Original research described the 6-step pipeline; the production research is summarised in the "Major Pivots" section above.
+
+## Phase 1 — Design
+
+See [data-model.md](./data-model.md). The original draft's `PreprocessingResult` + `PreprocessingConfig` were merged into a single `AIPResult` with module-level constants.
+
+## Phase 2 — Tasks
+
+See [tasks.md](./tasks.md). All tasks completed; new work follows [DEVELOPMENT_WORKFLOW.md](../../DEVELOPMENT_WORKFLOW.md).
+
+## Maintenance Notes
+
+When changing AIP:
+
+- **Threshold changes** (`MIN_ABSOLUTE_DENSITY_THRESHOLD`, the inline `0.15`, `0.20`, `30`): edit `roi_preprocessor.py` and update FR-003 / FR-010 in `spec.md`.
+- **Algorithm changes** (e.g. adding HSV / morphology back): edit `preprocess_roi`, update FR-003 in `spec.md`, and update the pipeline diagram in `spec.md`.
+- **Blank ROI generation**: edit `update_configs.py` and ensure `data/<id>/blank_rois/` is regenerated. Existing files become stale on template image changes.
+
+Any change to `AIPResult` schema (new fields, new constraints) MUST propagate to:
+- `data-model.md` (this folder).
+- `data-model.md` in `specs/002-vlm-roi-recognition/` (since Feature 002 consumes AIP fields).
+- `to_json_dict()` in `vlm_recognizer.py` if the new field needs to surface in output JSON.

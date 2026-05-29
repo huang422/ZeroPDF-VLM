@@ -2,11 +2,17 @@
 
 **Feature**: 001-document-template-alignment
 **Date**: 2025-12-23
+**Last Aligned With Code**: 2026-05-26
 **Phase**: 0 - Technical Research
 
 ## Overview
 
 This document captures research findings for technical decisions required to implement the document template alignment system.
+
+> **Implementation deltas from this research**:
+> - **Watermark removal (Section 3) was dropped** during implementation. SIFT proved robust to translucent watermarks, and applying HSV thresholding before SIFT was reducing feature richness and hurting match quality. Production code at `pipeline.py:97-103` feeds the original BGR image directly to feature extraction. Section 3 below is preserved as historical research only.
+> - **GPU acceleration (Section 4)** was not adopted for SIFT — CPU SIFT is fast enough (100–300 ms) and GPU SIFT requires a custom OpenCV build. GPU is only used by the downstream VLM stage (Ollama / Feature 002).
+> - All other sections (PyMuPDF, SIFT parameters, FLANN, RANSAC, ROI JSON, feature cache) match production code.
 
 ## 1. PDF to Image Conversion Library
 
@@ -152,9 +158,11 @@ Alternative: **BFMatcher** for accuracy (slower):
 matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
 ```
 
-## 3. Watermark Removal - HSV Thresholding Parameters
+## 3. Watermark Removal - HSV Thresholding Parameters (HISTORICAL — NOT IN PRODUCTION)
 
-### Decision
+> **This section is preserved for historical context only.** Production code does **not** perform watermark removal — the original BGR image is fed directly to SIFT. The reason: HSV thresholding before SIFT was destroying feature richness, especially around table borders and fine print, leading to worse matching. SIFT's scale-invariance and contrast-thresholding already handle translucent watermarks well enough.
+
+### Decision (NOT ADOPTED)
 
 Multi-stage thresholding targeting specific watermark colors
 

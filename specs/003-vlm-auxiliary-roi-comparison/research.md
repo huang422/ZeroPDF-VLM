@@ -2,7 +2,17 @@
 
 **Feature**: 003-vlm-auxiliary-roi-comparison
 **Date**: 2025-12-30
-**Status**: Complete
+**Last Aligned With Code**: 2026-05-26
+**Status**: ⚠️ **HISTORICAL — SUPERSEDED BY FEATURE 004.**
+
+> The SIFT-on-ROI approach researched below was prototyped and abandoned. Production research / decisions are documented in [`specs/004-vlm-roi-preprocessing/research.md`](../004-vlm-roi-preprocessing/research.md).
+>
+> **Why the prototype failed**:
+> 1. **Insufficient SIFT keypoints on small ROIs.** Checkboxes (~50×50 px) and short number fields typically yielded fewer than 4 keypoints after Lowe-ratio filtering — too few for RANSAC homography.
+> 2. **Homogeneous regions** (white stamp boxes) have near-zero SIFT response regardless of whether they're filled.
+> 3. **Threshold tuning** was unstable: an inlier-ratio threshold of 0.6 worked for some templates but missed faint stamps and over-counted noisy fields.
+>
+> Production AIP (BGR pixel diff + ECC sub-pixel alignment) avoids all three problems because it operates on raw pixels, not on keypoint detection.
 
 ## Overview
 

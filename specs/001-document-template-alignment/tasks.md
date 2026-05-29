@@ -2,6 +2,15 @@
 
 **Input**: Design documents from `/specs/001-document-template-alignment/`
 **Prerequisites**: plan.md, spec.md, research.md, data-model.md
+**Last Aligned With Code**: 2026-05-26
+**Status**: ✅ ALL TASKS COMPLETED. Production code lives at the file paths shown below. This document is preserved as a historical record of how the feature was built.
+
+> **Note for current contributors**: do not add new tasks here. New work follows the workflow described in [DEVELOPMENT_WORKFLOW.md](../../DEVELOPMENT_WORKFLOW.md) — open an issue / PR rather than appending to this historical task list.
+>
+> **Drift from this task list**:
+> - Watermark-removal tasks (T013–T018 in the original draft, if any) were **dropped** — see `research.md` Section 3.
+> - `batch_processor.py` and `cli.py` tasks were merged into the single `main.py` orchestrator.
+> - `data/<id>/template.png` was relocated to `templates/images/<id>.jpg`.
 
 **Tests**: Not requested in specification - focusing on core implementation
 

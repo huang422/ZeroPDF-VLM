@@ -1,6 +1,11 @@
 # Implementation Plan: VLM Auxiliary ROI Comparison System
 
 **Branch**: `003-vlm-auxiliary-roi-comparison` | **Date**: 2025-12-30 | **Spec**: [spec.md](spec.md)
+**Last Aligned With Code**: 2026-05-26
+**Status**: ⚠️ **SUPERSEDED BY FEATURE 004.** This plan was never implemented as-is. Read [`specs/004-vlm-roi-preprocessing/plan.md`](../004-vlm-roi-preprocessing/plan.md) for the implemented approach.
+
+> The SIFT-on-ROI strategy below was abandoned during prototyping because small / homogeneous ROIs do not yield enough SIFT keypoints. Production replaced this with **AIP (Advanced Image Processing)** — BGR-image pixel differencing with ECC sub-pixel alignment. The data structure `BlankROIFeatureCache` was replaced by `BlankTemplateROICache`, which caches the **blank ROI PNG images** rather than their SIFT features.
+
 **Input**: Feature specification from `/specs/003-vlm-auxiliary-roi-comparison/spec.md`
 
 **Note**: This template is filled in by the `/speckit.plan` command. See `.specify/templates/commands/plan.md` for the execution workflow.

@@ -2,335 +2,240 @@
 
 **Feature**: 001-document-template-alignment
 **Date**: 2025-12-23
-**Phase**: 1 - Design
+**Last Aligned With Code**: 2026-05-26
+**Status**: Reflects current dataclasses in `vlm_pdf_recognizer/`. Earlier draft references to "preprocessed_image / watermark removal" have been removed because that preprocessing step was deleted from the pipeline (SIFT handles watermarks natively).
 
 ## Overview
 
-This document defines the data structures and entities used in the document template alignment system. All models are designed for file-based storage and processing.
+This document lists the runtime entities used by the alignment + ROI extraction stage. All entities are Python dataclasses (or plain classes) — no database is involved. Source-of-truth files are linked per entity.
+
+---
 
 ## Core Entities
 
 ### 1. GoldenTemplate
+**Source**: [vlm_pdf_recognizer/templates/__init__.py](../../vlm_pdf_recognizer/templates/__init__.py)
 
-Represents a reference template for document classification and alignment.
+| Field | Type | Notes |
+|---|---|---|
+| `template_id` | `str` | One of `{contractor_1, contractor_2, enterprise_1}`. |
+| `template_image` | `np.ndarray` (BGR, uint8) | Golden image loaded from `templates/images/<id>.jpg`. |
+| `image_shape` | `Tuple[int, int, int]` | `(H, W, 3)` — every aligned image is warped to this shape. |
+| `keypoints` | `List[cv2.KeyPoint]` | SIFT keypoints, loaded from `data/<id>/template_features.pkl` if cached. |
+| `descriptors` | `np.ndarray` | SIFT descriptors. |
+| `rois` | `List[ROI]` | Loaded from `data/<id>/config.json`. |
 
-**Fields**:
-- `template_id`: str - Unique identifier (e.g., "enterprise_1", "contractor_1", "contractor_2")
-- `template_image_path`: str - Path to template image file (PNG format)
-- `config_path`: str - Path to JSON configuration file
-- `features_cache_path`: str - Path to cached SIFT features (PKL file)
-- `keypoints`: List[cv2.KeyPoint] - SIFT keypoints (loaded from cache or computed)
-- `descriptors`: np.ndarray - SIFT descriptors (NxM matrix)
-- `image_shape`: Tuple[int, int, int] - (height, width, channels) of template image
-- `rois`: List[ROI] - Regions of interest defined for this template
-
-**Validation Rules**:
-- `template_id` must match one of: ["enterprise_1", "contractor_1", "contractor_2"]
-- `template_image_path` must exist and be readable
-- `config_path` must exist and contain valid JSON
-- If `features_cache_path` exists and is newer than template image, load from cache
-- Otherwise, compute features and save to cache
-
-**State Transitions**:
-- Unloaded → Loading → Loaded (features cached)
-- Loaded → Stale (if template image modified) → Re-computing → Loaded
-
-**File Location**: `data/{template_id}/`
+**Lifecycle**: Constructed once at `DocumentProcessor.__init__` via `template_loader.load_all_templates()`. SIFT features are auto-cached on first run.
 
 ---
 
-### 2. ROI (Region of Interest)
+### 2. ROI
+**Source**: [vlm_pdf_recognizer/templates/__init__.py](../../vlm_pdf_recognizer/templates/__init__.py)
 
-Represents a specific rectangular area on a template for data extraction.
+| Field | Type | Notes |
+|---|---|---|
+| `roi_id` | `str` | Must equal a `field_id` in `recognition/field_schema.py` for that template. |
+| `description` | `str` | Human-readable label. |
+| `bounding_box` | `Tuple[int, int, int, int]` | `(x1, y1, x2, y2)` in template image coordinates. |
+| `visualization_color` | `Tuple[int, int, int]` | Default BGR color for the verification overlay. |
 
-**Fields**:
-- `roi_id`: str - Unique identifier within template (e.g., "company_name", "date")
-- `description`: str - Human-readable description
-- `x1`: int - Top-left X coordinate
-- `y1`: int - Top-left Y coordinate
-- `x2`: int - Bottom-right X coordinate
-- `y2`: int - Bottom-right Y coordinate
-- `format`: str - Always "top_left_bottom_right"
-
-**Validation Rules**:
-- `x1 < x2` and `y1 < y2` (valid rectangle)
-- All coordinates must be non-negative
-- Coordinates must be within template image bounds
-- `roi_id` must be unique within template
-
-**Relationships**:
-- Belongs to exactly one GoldenTemplate
-- Multiple ROIs per template allowed
-
-**Serialization**: JSON format in template config file
+**Constraint**: All ROIs share their template's pixel grid — they are valid for the **aligned** document, not the raw scan.
 
 ---
 
-### 3. InputDocument
+### 3. ExtractedROI
+**Source**: [vlm_pdf_recognizer/extraction/roi_extractor.py](../../vlm_pdf_recognizer/extraction/roi_extractor.py)
 
-Represents a document to be processed (PDF or image).
-
-**Fields**:
-- `file_path`: str - Path to input file
-- `file_type`: str - One of: ["pdf", "png", "jpg", "jpeg"]
-- `pages`: List[DocumentPage] - List of pages (1 for images, N for PDFs)
-- `total_pages`: int - Number of pages
-
-**Validation Rules**:
-- `file_path` must exist and be readable
-- `file_type` must match actual file extension
-- For PDFs: `total_pages >= 1`
-- For images: `total_pages == 1`
-
-**State Transitions**:
-- Created → Loaded → Pages Extracted → Processing → Completed/Failed
+| Field | Type | Notes |
+|---|---|---|
+| `roi_id` | `str` | Same as the originating `ROI`. |
+| `description` | `str` | |
+| `bounding_box` | `Tuple[int,int,int,int]` | Same as the originating `ROI` (after warp, coordinates match template). |
+| `visualization_color` | `Tuple[int,int,int]` | |
+| `roi_image` | `np.ndarray` | BGR crop from the aligned image, passed downstream to Feature 002 / 004. |
 
 ---
 
-### 4. DocumentPage
+### 4. FeatureMatch
+**Source**: [vlm_pdf_recognizer/alignment/template_matcher.py](../../vlm_pdf_recognizer/alignment/template_matcher.py)
 
-Represents a single page from an input document (extracted from PDF or direct image).
-
-**Fields**:
-- `page_number`: int - Page index (0-based)
-- `image_array`: np.ndarray - BGR image array (HxWx3)
-- `original_dimensions`: Tuple[int, int] - (height, width) before any processing
-- `preprocessed_image`: Optional[np.ndarray] - After watermark removal and binarization
-- `keypoints`: Optional[List[cv2.KeyPoint]] - SIFT keypoints (computed during matching)
-- `descriptors`: Optional[np.ndarray] - SIFT descriptors
-- `matched_template`: Optional[str] - ID of matched template
-- `match_confidence`: Optional[float] - Ratio of inliers to total matches
-- `inlier_count`: Optional[int] - Number of inlier matches
-- `homography_matrix`: Optional[np.ndarray] - 3x3 transformation matrix
-- `aligned_image`: Optional[np.ndarray] - Image after perspective warp
-- `processing_status`: str - One of: ["pending", "preprocessing", "matching", "aligning", "extracting", "completed", "failed"]
-- `error_message`: Optional[str] - Error details if status == "failed"
-
-**Validation Rules**:
-- `image_array` must be 3-channel BGR format
-- `match_confidence` range: [0.0, 1.0]
-- `inlier_count >= 50` for successful match (threshold from FR-016)
-- `homography_matrix` must be 3x3 if present
-
-**State Transitions**:
-```
-pending → preprocessing → matching → aligning → extracting → completed
-                                                            ↘ failed
-```
+| Field | Type | Notes |
+|---|---|---|
+| `template_id` | `str` | |
+| `total_matches` | `int` | Lowe-ratio-filtered matches. |
+| `good_matches` | `List[cv2.DMatch]` | |
+| `inliers` | `np.ndarray` | RANSAC inlier mask. |
+| `inlier_count` | `int` | The voting metric. |
+| `confidence` | `float` | `inlier_count / total_matches`. |
+| `homography_matrix` | `np.ndarray` | 3×3, computed per template. |
 
 ---
 
-### 5. FeatureMatch
+### 5. TemplateMatchResult
+**Source**: [vlm_pdf_recognizer/alignment/template_matcher.py](../../vlm_pdf_recognizer/alignment/template_matcher.py)
 
-Represents a match between input document and template features.
+| Field | Type | Notes |
+|---|---|---|
+| `matched_template_id` | `str` | Winner of the inlier vote. |
+| `matched_template` | `GoldenTemplate` | |
+| `match_confidence` | `float` | Winner's confidence ratio. |
+| `inlier_count` | `int` | Winner's inlier count. |
+| `homography_matrix` | `np.ndarray` | Winner's homography (used for warp). |
+| `all_matches` | `List[FeatureMatch]` | All candidates — useful for debugging. |
 
-**Fields**:
-- `template_id`: str - ID of template being matched against
-- `total_matches`: int - Total feature matches found
-- `good_matches`: List[cv2.DMatch] - Matches passing Lowe's ratio test
-- `inliers`: np.ndarray - Boolean mask from RANSAC (1 = inlier, 0 = outlier)
-- `inlier_count`: int - Number of inliers
-- `confidence`: float - inlier_count / total_matches
-
-**Validation Rules**:
-- `inlier_count <= total_matches`
-- `confidence` range: [0.0, 1.0]
-- `good_matches` filtered with ratio < 0.7 (Lowe's ratio test)
-
-**Relationships**:
-- One FeatureMatch per (DocumentPage, GoldenTemplate) pair
-- DocumentPage has 3 FeatureMatches (one per template)
-- Winner selected based on highest `inlier_count` (voting mechanism from FR-009)
+**Failure**: If `winner.inlier_count < 50`, `match_templates()` raises `UnknownDocumentError` instead of returning.
 
 ---
 
 ### 6. ProcessingResult
+**Source**: [vlm_pdf_recognizer/pipeline.py](../../vlm_pdf_recognizer/pipeline.py)
 
-Represents the output of processing a single document page.
-
-**Fields**:
-- `input_file_path`: str - Original input file
-- `page_number`: int - Page index
-- `matched_template_id`: str - ID of matched template
-- `match_confidence`: float - Confidence score [0.0, 1.0]
-- `inlier_count`: int - Number of inlier feature matches
-- `alignment_success`: bool - Whether alignment succeeded
-- `extracted_rois`: List[ExtractedROI] - ROI regions extracted from aligned image
-- `output_image_path`: str - Path to saved verification image with ROI boxes
-- `processing_time_seconds`: float - Total processing time
-- `error_message`: Optional[str] - Error if processing failed
-
-**Validation Rules**:
-- `match_confidence >= 0.5` recommended (not enforced, logged as warning)
-- `inlier_count >= 50` required (from FR-016)
-- `alignment_success == True` required for ROI extraction
-- `output_image_path` must be written to output/ directory
+| Field | Type | Notes |
+|---|---|---|
+| `input_path` | `str` | Original input file path. |
+| `page_number` | `int` | 0 for images / single-page; ≥ 0 per PDF page. |
+| `matched_template_id` | `str` | The winning template ID, or `"unknown"` / `"error"` on failure. |
+| `confidence_score` | `int` | **Inlier count** (not a probability). |
+| `processing_time_ms` | `float` | Wall-clock for this page. |
+| `aligned_image` | `np.ndarray` | BGR, warped to template dimensions. |
+| `visualization_image` | `np.ndarray` | Aligned image + ROI boxes (later overwritten by Feature 002 colour-coding when VLM is enabled). |
+| `extracted_rois` | `List[ExtractedROI]` | Same order as `template.rois`. |
+| `success` | `bool` | `True` only when matching, warping and crops all succeeded. |
+| `error_message` | `Optional[str]` | Populated on failure. |
 
 ---
 
-### 7. ExtractedROI
+### 7. UnknownDocumentError
+**Source**: [vlm_pdf_recognizer/alignment/template_matcher.py](../../vlm_pdf_recognizer/alignment/template_matcher.py)
 
-Represents a cropped ROI region from aligned document.
-
-**Fields**:
-- `roi_id`: str - ID from template configuration
-- `description`: str - Human-readable description
-- `bounding_box`: Tuple[int, int, int, int] - (x1, y1, x2, y2) in aligned image coordinates
-- `roi_image`: np.ndarray - Cropped image region
-- `visualization_color`: Tuple[int, int, int] - BGR color for bounding box overlay (default: green (0, 255, 0))
-
-**Validation Rules**:
-- `bounding_box` must be within aligned image bounds
-- `roi_image` dimensions must match (x2-x1, y2-y1)
-
-**Relationships**:
-- Belongs to one ProcessingResult
-- Corresponds to one ROI definition from GoldenTemplate
-
----
-
-### 8. BatchProcessingJob
-
-Represents a batch processing operation on multiple documents.
-
-**Fields**:
-- `job_id`: str - Unique identifier (UUID or timestamp-based)
-- `input_directory`: str - Directory containing input documents
-- `output_directory`: str - Directory for outputs
-- `input_files`: List[str] - Paths to all input files
-- `total_files`: int - Number of files to process
-- `completed_count`: int - Number successfully processed
-- `failed_count`: int - Number failed
-- `processing_results`: List[ProcessingResult] - Results for each processed page
-- `failed_files`: List[Tuple[str, str]] - (file_path, error_message) for failures
-- `start_time`: datetime - Job start timestamp
-- `end_time`: Optional[datetime] - Job completion timestamp
-- `status`: str - One of: ["queued", "running", "completed", "partial_failure"]
-
-**Validation Rules**:
-- `completed_count + failed_count <= total_files`
-- `status == "completed"` only if `completed_count == total_files`
-- `status == "partial_failure"` if `failed_count > 0` and `completed_count > 0`
-
-**State Transitions**:
-```
-queued → running → completed (if all succeed)
-                 → partial_failure (if some fail, continue per FR-024)
-```
+Raised when the best template still has `< 50` RANSAC inliers. Error message includes per-template inlier breakdown for diagnostics.
 
 ---
 
 ## Data Flow
 
 ```
-InputDocument (PDF/Image)
-    ↓
-DocumentPage(s) extracted with dimension preservation
-    ↓
-Preprocessing: watermark removal → binary image
-    ↓
-Feature Extraction: SIFT keypoints & descriptors
-    ↓
-Feature Matching: against all 3 GoldenTemplates → 3 FeatureMatch objects
-    ↓
-Template Selection: max(inlier_count) → matched_template_id
-    ↓
-Homography Computation: RANSAC → homography_matrix
-    ↓
-Geometric Alignment: warpPerspective → aligned_image
-    ↓
-ROI Extraction: crop regions → ExtractedROI objects
-    ↓
-Visualization: draw bounding boxes → output_image
-    ↓
-ProcessingResult saved to output/ directory
+input/<date>/<case_id>/<file>                    (Path)
+   │
+   ▼
+pdf_to_images()              ──►  List[BGR ndarray]   (one entry per page)
+   │
+   ▼
+extract_features()           ──►  (keypoints, descriptors)   (doc: ≤5000 features)
+   │
+   ▼
+match_templates()            ──►  TemplateMatchResult
+   │                              └─ raises UnknownDocumentError if inliers < 50
+   ▼
+align_document_to_template() ──►  aligned_image           (warpPerspective)
+   │
+   ▼
+extract_rois()               ──►  List[ExtractedROI]
+   │
+   ▼
+draw_roi_boxes()             ──►  visualization_image
+   │
+   ▼
+ProcessingResult
+   │
+   ▼  (downstream — Feature 002/004)
+VLMRecognizer.process_document()
+   │
+   ▼
+DocumentRecognitionOutput  (see specs/002 data-model)
 ```
 
-## File Structure Mapping
+---
+
+## File-System Mapping
 
 ```
 data/
-├── enterprise_1/
-│   ├── template.png              → GoldenTemplate.template_image_path
-│   ├── template_features.pkl     → GoldenTemplate.features_cache_path
-│   └── config.json               → GoldenTemplate.config_path (contains ROI definitions)
 ├── contractor_1/
-│   └── [same structure]
-└── contractor_2/
-    └── [same structure]
+│   ├── config.json              # ROI coordinates (generated by update_configs.py)
+│   ├── template_features.pkl    # Cached SIFT keypoints + descriptors
+│   └── blank_rois/<field>.png   # Blank reference for Feature 004 AIP
+├── contractor_2/
+│   └── … (same structure)
+└── enterprise_1/
+    └── … (same structure)
 
-output/
-└── {timestamp}_{filename}_page{N}/
-    ├── aligned_with_rois.png     → ProcessingResult.output_image_path
-    └── metadata.json             → ProcessingResult serialized
+templates/
+├── images/<template_id>.jpg     # Golden template image
+└── location/<template_id>.json  # LabelMe annotation (source of truth for ROIs)
+
+input/
+└── <date>/<case_id>/<file>      # Required two-level nesting
+
+output/                          # Mirrors input layout per date/case
+└── <date>/
+    ├── VLM_results.json
+    ├── vlm_recognition_results.csv
+    ├── result_log.md
+    └── <case_id>/
+        ├── <doc>_visualization.png
+        ├── metadata/<doc>_metadata.json
+        ├── rois/<doc>_roi_<field>.png
+        └── processed_rois/<doc>_roi_<field>_processed.png
 ```
 
-## Configuration File Schema
+---
 
-### Template Config (config.json)
+## Template Config Schema (`data/<id>/config.json`)
+
+The actual schema is whatever `update_configs.py` produces from LabelMe annotations. Conceptually:
 
 ```json
 {
-  "template_name": "enterprise_1",
-  "template_version": "1.0",
-  "image_dimensions": {
-    "width": 2480,
-    "height": 3508,
-    "unit": "pixels"
-  },
+  "template_id": "contractor_1",
+  "image_shape": [3508, 2480, 3],
   "rois": [
     {
-      "id": "company_name",
-      "description": "Company name field",
-      "coordinates": {
-        "x1": 200,
-        "y1": 150,
-        "x2": 800,
-        "y2": 250
-      },
-      "format": "top_left_bottom_right"
-    }
+      "roi_id": "VX1",
+      "description": "Disagreement checkbox",
+      "bounding_box": [200, 150, 800, 250],
+      "visualization_color": [0, 255, 0]
+    },
+    ...
   ]
 }
 ```
 
-### Feature Cache (template_features.pkl)
+**Authoritative source**: regenerate `config.json` whenever `templates/location/<id>.json` (LabelMe) changes — never hand-edit `config.json`.
+
+---
+
+## Feature Cache (`data/<id>/template_features.pkl`)
 
 ```python
 {
-  'keypoints': [(pt, size, angle, response, octave, class_id), ...],
-  'descriptors': np.ndarray,  # NxM SIFT descriptors
-  'image_shape': (height, width, channels),
-  'template_name': str,
-  'created_at': ISO 8601 timestamp
+  "keypoints": [(pt, size, angle, response, octave, class_id), ...],
+  "descriptors": np.ndarray,     # N x 128 (SIFT)
+  "image_shape": (H, W, 3),
+  "template_id": str,
+  "created_at": ISO-8601 timestamp,
 }
 ```
 
-## Error Handling
+Cache invalidation is based on file modification time vs. the source template image — see `template_cache.py`.
 
-**Error Types**:
-1. **UnknownDocumentError**: Raised when `inlier_count < 50` for all templates (FR-016)
-2. **InvalidTemplateError**: Template image or config missing/corrupted
-3. **PDFConversionError**: Failed to convert PDF to images
-4. **AlignmentError**: Homography computation failed or produced invalid matrix
-5. **ROIExtractionError**: ROI coordinates out of bounds after alignment
+---
 
-**Error Recovery** (Batch Mode - FR-024):
-- Log error with file path and error type
-- Continue processing remaining files
-- Report all failures in final summary
+## Errors & Recovery
 
-## Performance Considerations
+| Error | Where | Recovery |
+|---|---|---|
+| `UnknownDocumentError` (< 50 inliers) | `match_templates()` | Caught in `DocumentProcessor.process_image()` → returns `ProcessingResult(success=False, matched_template_id="unknown")`. |
+| `FileNotFoundError` | `DocumentProcessor.process_file()` | Re-raised to caller (`main.py`) — counted toward batch failure stats but does not abort the batch. |
+| `cv2.error` during SIFT / FLANN / warp | `DocumentProcessor.process_image()` | Caught → `ProcessingResult(success=False, matched_template_id="error", error_message=str(e))`. |
+| PDF load failure | `pdf_to_images()` | Surfaces as a generic exception → batch continues with next file. |
 
-1. **Feature Cache**: Load cached SIFT features for templates on startup (avoid recomputation per FR-015)
-2. **Memory**: Process one page at a time, release after writing output
-3. **GPU Acceleration**: Check `cv2.cuda.getCudaEnabledDeviceCount()` on startup, use if available (FR-017)
-4. **Batch Processing**: Process sequentially but fail independently (FR-024)
+---
 
-## Summary
+## What's Intentionally Absent From This Stage
 
-- **8 core entities** defined with clear validation rules
-- **File-based storage** for templates and outputs
-- **State machines** for document processing workflow
-- **Error types** mapped to functional requirements
-- **Performance optimizations** via caching and GPU detection
+- **No preprocessing of pixels** (watermark removal, binarisation) — removed.
+- **No content presence detection** — owned by Feature 004 AIP downstream.
+- **No text recognition** — owned by Feature 002 VLM downstream.
+- **No validation logic** — owned by Feature 002 `calculate_results_status`.
+- **No batch-job entity** — `main.py` is the orchestrator; per-batch state lives in local variables / log lines.

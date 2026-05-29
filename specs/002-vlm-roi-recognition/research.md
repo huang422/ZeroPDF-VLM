@@ -1,12 +1,48 @@
 # Research: VLM-Based ROI Content Recognition
 
 **Feature**: 002-vlm-roi-recognition
-**Date**: 2025-12-23
+**Date**: 2025-12-23 (original) / 2026 (Ollama pivot)
+**Last Aligned With Code**: 2026-05-26
 **Phase**: 0 - Technical Research
 
-## Overview
+## Status
 
-This document captures research findings for technical decisions required to implement InternVL 3.5-1B vision-language model integration for zero-shot ROI field content recognition.
+> **This research document has two layers**:
+> - **Sections 1–5 below** describe the **original InternVL 3.5-1B research**. This approach was **abandoned** during implementation — see Section 0 below for the pivot rationale.
+> - **Current production** uses Ollama-hosted `glm-ocr` with raw OCR text output. Decisions are summarised in Section 0 and detailed in [plan.md](./plan.md).
+>
+> Both layers are kept so future maintainers understand *why* the codebase looks the way it does.
+
+## 0. Pivot Decision (Ollama `glm-ocr`)
+
+### What changed
+
+| Aspect | Original (InternVL) | Production (Ollama glm-ocr) |
+|---|---|---|
+| Model serving | HuggingFace Transformers in-process | Ollama HTTP server, separate process |
+| Model | OpenGVLab/InternVL3_5-1B | `glm-ocr` |
+| Quantization | App manages INT4/INT8/unquantized fallback | Ollama manages internally |
+| Output format | JSON `{has_content, content_text}` | Raw OCR text |
+| `has_content` source | VLM JSON field | AIP (Feature 004) pixel-difference |
+| Cold start | Minutes (HF download + model load) | Seconds (Ollama keeps model resident) |
+| Dependencies | torch, transformers, timm, accelerate | requests, opencc |
+
+### Why
+
+1. **HF + quantization fragility on CPU**: INT4/INT8 paths frequently OOM'd or hung; cold starts ran 3–5 minutes per process.
+2. **Malformed JSON**: small VLMs (1B–4B) returned malformed JSON often enough that parser fallbacks were dominating runtime.
+3. **Maintenance**: managing torch/transformers/timm versions across machines was painful.
+4. **Separation of concerns**: making AIP responsible for `has_content` (deterministic, debuggable) and reducing VLM to "extract text" (its strength) produced more reliable validation.
+
+### Trade-offs accepted
+
+- Requires Ollama installed and `glm-ocr` pulled. README documents the install.
+- VLM stage now requires an external process to be running.
+- We lose JSON-structured reasoning from the VLM — but post-processing (Traditional-Chinese conversion, prompt-echo filtering, stamp-placeholder removal) makes raw OCR usable.
+
+---
+
+## 1. InternVL Model Variant Selection (HISTORICAL — NOT IN PRODUCTION)
 
 ## 1. InternVL Model Variant Selection
 

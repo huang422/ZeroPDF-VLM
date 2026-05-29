@@ -2,7 +2,49 @@
 
 **Feature**: 004-vlm-roi-preprocessing
 **Created**: 2025-12-31
+**Last Aligned With Code**: 2026-05-26
 **Purpose**: Document technical decisions and rationale for preprocessing pipeline implementation
+
+## Status
+
+> **The 6-step pipeline researched below was simplified during implementation.** Production uses **ECC sub-pixel alignment + BGR mean-difference + two-tier threshold**, not the proposed HSV → morphology → connected-components flow. Sections 1–7 below are preserved as historical research; Section 0 captures the production design.
+
+## 0. Production Design (Implemented)
+
+### Algorithm
+
+```
+Step 1. Validate doc/template ROI shape & dtype (uint8 BGR, 3-channel)
+Step 2. Resize doc to template if shapes differ (log warning if >10% size diff)
+Step 3. ECC sub-pixel alignment (MOTION_EUCLIDEAN)
+Step 4. abs_diff = |doc_aligned_float - template_float|
+Step 5. diff_gray = mean(abs_diff, axis=2).astype(uint8)
+Step 6. mean_diff = mean(diff_gray) / 255.0
+Step 7. significant_ratio = count(diff_gray > 30) / total_pixels
+Step 8. Decision:
+          if mean_diff > 0.15:
+            has_content = (significant_ratio > 0.20)        # pre-printed-text branch
+          else:
+            has_content = (mean_diff > 0.01)                  # normal branch
+```
+
+### Why this won over the draft 6-step pipeline
+
+1. **BGR-mean-diff is already discriminating enough** for the production document set (dark ink on white forms). HSV saturation didn't add observable accuracy.
+2. **Morphological line removal** required per-template kernel sizing and risked deleting faint signatures.
+3. **Connected components** added ~ 5 ms / ROI without measurable accuracy gain.
+4. **Two thresholds beat five.** The 5 knobs in the draft were a maintenance hazard — different templates pushed for different values.
+5. **The `mean_diff > 0.15` special case** handles fields with pre-printed placeholder text (stamp boxes labelled `負責人蓋章處`) where even a perfectly aligned diff shows residual text-outline noise.
+
+### Why ECC
+
+Feature 001's homography is global per page. Within a single ROI, sub-pixel translation / rotation drift still exists (scanner non-uniformity, slight paper warp). Without ECC, the diff ghosts pre-printed text outlines and produces false positives. `MOTION_EUCLIDEAN` (4 DoF: translation + rotation) was chosen over `MOTION_TRANSLATION` (2 DoF) because some scans introduce small rotational drift even after Feature 001's correction.
+
+### Failure path
+
+Any exception during preprocessing → caught → `AIPResult(has_content=None, error_message=str(e))`. Feature 002 then runs the VLM unconditionally for that field. No crash.
+
+---
 
 ## Overview
 

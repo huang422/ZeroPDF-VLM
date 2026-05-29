@@ -2,6 +2,20 @@
 
 **Feature**: 003-vlm-auxiliary-roi-comparison
 **Date**: 2025-12-30
+**Last Aligned With Code**: 2026-05-26
+**Status**: ⚠️ **SUPERSEDED.** None of the entities below exist in production code. Current AIP entities live in [`specs/004-vlm-roi-preprocessing/data-model.md`](../004-vlm-roi-preprocessing/data-model.md).
+
+> **Substitution table** (what the original draft proposed vs. what production has):
+>
+> | Original draft (NOT in code) | Production replacement |
+> |---|---|
+> | `BlankROIFeatureCache` (SIFT descriptors per blank ROI) | `BlankTemplateROICache` (PNG images per blank ROI) — `vlm_pdf_recognizer/alignment/blank_template_roi_cache.py` |
+> | `ROIComparator` (SIFT match) | `ROIPreprocessor` (ECC align + BGR diff) — `vlm_pdf_recognizer/recognition/roi_preprocessor.py` |
+> | `AuxiliaryRecognitionResult` (`auxiliary_has_content` + `vlm_has_content`) | `RecognitionResult` with single `has_content` (sourced from AIP) plus `AIP_*` diagnostic fields |
+> | `data/<id>/blank_roi_features.npz` | `data/<id>/blank_rois/<field>.png` |
+> | similarity threshold 0.6 (inlier ratio) | `MIN_ABSOLUTE_DENSITY_THRESHOLD = 0.01` (BGR mean diff) and `significant_ratio > 0.20` for pre-printed fields |
+
+---
 
 ## Overview
 
